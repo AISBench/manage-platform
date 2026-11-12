@@ -1,0 +1,14 @@
+services:
+  platform:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:3210:3210"
+    volumes:
+      - triage-data:/app/data
+volumes:
+  triage-data:

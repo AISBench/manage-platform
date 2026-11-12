@@ -1,0 +1,6 @@
+# Host-installed Caddy only. Replace domain before use.
+# App Compose publishes 127.0.0.1:3210 on this same host.
+# Do not install this alongside an existing service already occupying 80/443.
+triage.example.com {
+    reverse_proxy 127.0.0.1:3210
+}
