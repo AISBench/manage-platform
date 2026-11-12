@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { loadConfig } from '../server/config.js';
 import { isParticipant,isQuietTime } from '../server/services.js';
-import { createMember,setMemberStatus } from '../server/members.js';
+import { setMemberStatus } from '../server/members.js';
 import { getSetting } from '../server/db.js';
-import { httpFixture,bindTestMember } from './helpers.js';
+import { httpFixture,bindTestMember,addTestMember } from './helpers.js';
 
 test('configuration defaults and fails closed without trusting runtime whitelist',()=>{
   assert.throws(()=>loadConfig({}),/Production requires/);
@@ -43,18 +43,14 @@ test('csrf, strict body validation, immutable member fields and unknown routes',
   assert.equal((await c.request('/api/unknown')).status,404);
 });
 
-test('administrator resolve-confirm create/edit/disable/enable includes pending members',async t=>{
+test('administrator edits and disables auto-provisioned members',async t=>{
   const f=await httpFixture(t,{config:{demo:true}}),c=f.client('demo-admin');
-  const found=await c.request('/api/admin/github-users/resolve?login=new-contributor');assert.equal(found.data.profile.githubId,'1005');
-  assert.equal((await c.request('/api/admin/members','POST',{githubLogin:'new-contributor',expectedGithubId:'999'})).status,409);
-  const created=await c.request('/api/admin/members','POST',{githubLogin:'new-contributor',expectedGithubId:'1005',displayName:'新成员',module:'数据集',notes:'内部备注',role:'member'});assert.equal(created.status,201);assert.equal(created.data.member.status,'pending_activation');
-  const m=created.data.member;
-  assert.equal((await c.request('/api/admin/members','POST',{githubLogin:'new-contributor',expectedGithubId:'1005'})).status,409);
+  const m=(await c.request('/api/admin/members?q=reviewer-chen')).data.members[0];
   const changed=await c.request(`/api/admin/members/${m.id}`,'PATCH',{version:m.version,displayName:'新姓名'});assert.equal(changed.status,200);
   assert.equal((await c.request(`/api/admin/members/${m.id}`,'PATCH',{version:m.version,module:'stale'})).status,409);
   const disabled=await c.request(`/api/admin/members/${m.id}/disable`,'POST',{version:changed.data.member.version});assert.equal(disabled.data.member.status,'disabled');
-  const enabled=await c.request(`/api/admin/members/${m.id}/enable`,'POST',{version:disabled.data.member.version});assert.equal(enabled.data.member.status,'pending_activation');
-  const listing=await c.request('/api/admin/members?status=pending_activation&page=1&pageSize=1');assert.equal(listing.data.members.length,1);assert.ok(listing.data.total>=2);
+  const enabled=await c.request(`/api/admin/members/${m.id}/enable`,'POST',{version:disabled.data.member.version});assert.equal(enabled.data.member.status,'active');
+  const listing=await c.request('/api/admin/members?status=active&page=1&pageSize=1');assert.equal(listing.data.members.length,1);assert.ok(listing.data.total>=2);
   const normal=f.client('demo-reviewer');const assignable=await normal.request('/api/assignable-members');assert.ok(assignable.data.members.some(v=>v.id===m.id));assert.ok(assignable.data.members.every(v=>!('notes' in v)&&v.status!=='disabled'));
 });
 
@@ -90,25 +86,27 @@ test('bulk assignment is all-or-nothing and audits before/after',async t=>{
   const logs=await c.request('/api/admin/audit-logs?action=item.update');assert.ok(logs.data.total>=2);assert.ok(logs.data.logs[0].requestId);
 });
 
-test('live OAuth activation matches fixed ID despite rename; same username reused by another ID denied',async t=>{
+test('live OAuth links the fixed ID despite rename; same username reused by another ID becomes a separate member',async t=>{
   let profile={id:777,login:'after-rename',type:'User',name:'GitHub 昵称'};
   const f=await httpFixture(t,{seed:false,config:{admins:['attacker'],allowed:['after-rename']},fetchImpl:async url=>new Response(JSON.stringify(String(url).includes('access_token')?{access_token:'private-token'}:profile),{status:200,headers:{'Content-Type':'application/json'}})});
-  const invited=createMember(f.db,{profile:{githubId:'777',login:'before-rename',type:'User'},displayName:'团队姓名'}),c=f.client();
+  const invited=addTestMember(f.db,{githubId:'777',login:'before-rename',status:'pending_activation'}),c=f.client();
+  f.db.prepare("UPDATE members SET display_name='团队姓名' WHERE id=?").run(invited.id);
   assert.equal((await c.request('/api/dashboard')).status,401);
   async function oauth() {const start=await c.request('/auth/github');const state=new URL(start.response.headers.get('location')).searchParams.get('state');return c.request(`/auth/github/callback?state=${state}&code=abc`);}
   assert.equal((await oauth()).status,302);
   const session=await c.request('/api/session');assert.equal(session.data.user.memberId,invited.id);assert.equal(session.data.user.login,'after-rename');assert.equal(session.data.user.name,'团队姓名');assert.equal(session.data.user.isAdmin,false);
   assert.equal((await c.request('/api/members')).status,403);assert.equal((await c.request('/api/notifications')).status,200);
   await c.request('/auth/logout','POST',{});
-  profile={id:778,login:'before-rename',type:'User'};assert.equal((await oauth()).status,302);assert.equal((await c.request('/api/session')).data.mode,'applicant');assert.equal((await c.request('/api/dashboard')).status,401);
+  profile={id:778,login:'before-rename',type:'User'};assert.equal((await oauth()).status,302);const second=await c.request('/api/session');assert.equal(second.data.mode,'member');assert.equal(second.data.user.githubId,'778');
   profile={id:777,login:'another-name',type:'User'};const m=f.db.prepare('SELECT version FROM members WHERE id=?').get(invited.id);setMemberStatus(f.db,invited.id,{version:m.version,enabled:false});assert.equal((await oauth()).status,403);
 });
 
-test('OAuth browser state consumed once and access remains denied without pre-entry',async t=>{
-  const f=await httpFixture(t,{seed:false,fetchImpl:async url=>new Response(JSON.stringify(String(url).includes('access_token')?{access_token:'secret'}:{id:123,type:'User',login:'unknown'}),{status:200})}),c=f.client();
+test('OAuth browser state is consumed once and first login auto-provisions a member',async t=>{
+  const f=await httpFixture(t,{seed:false,fetchImpl:async url=>new Response(JSON.stringify(String(url).includes('access_token')?{access_token:'secret'}:{id:123,type:'User',login:'unknown',avatar_url:'https://avatars.githubusercontent.com/u/123'}),{status:200})}),c=f.client();
   const start=await c.request('/auth/github'),state=new URL(start.response.headers.get('location')).searchParams.get('state');
-  assert.equal((await c.request(`/auth/github/callback?state=${state}&code=code`)).status,302);assert.equal((await c.request('/api/dashboard')).status,401);
-  assert.equal((await c.request(`/auth/github/callback?state=${state}&code=code`)).status,400);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM members').get().n,0);
+  assert.equal((await c.request(`/auth/github/callback?state=${state}&code=code`)).status,302);assert.equal((await c.request('/api/dashboard')).status,200);
+  const session=await c.request('/api/session');assert.equal(session.data.mode,'member');assert.equal(session.data.user.githubId,'123');assert.equal(session.data.user.avatarUrl,'https://avatars.githubusercontent.com/u/123');
+  assert.equal((await c.request(`/auth/github/callback?state=${state}&code=code`)).status,400);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM members').get().n,1);
 });
 
 test('personal preferences/demo send protection and sanitized integration metrics',async t=>{
@@ -116,7 +114,7 @@ test('personal preferences/demo send protection and sanitized integration metric
   assert.equal((await c.request('/api/preferences','PATCH',{notificationsEnabled:false,quietStart:'22:00',quietEnd:'08:00'})).data.user.notificationsEnabled,false);
   assert.deepEqual((await c.request('/api/feishu/test','POST',{})).data,{sent:false,demo:true});
   assert.deepEqual((await c.request('/api/reminders/run','POST',{})).data,{queued:0,delivered:0,failed:0,skipped:0});
-  const status=await c.request('/api/admin/integration-status');assert.equal(status.data.schemaVersion,3);assert.equal(status.data.syncIntervalMinutes,10);assert.equal(status.data.membership.pending,1);
+  const status=await c.request('/api/admin/integration-status');assert.equal(status.data.schemaVersion,4);assert.equal(status.data.syncIntervalMinutes,10);assert.equal(status.data.membership.pending,1);
   assert.ok(!JSON.stringify(status.data).includes('test-secret'));assert.equal((await c.request('/api/feishu/binding','DELETE',{})).status,200);
 });
 

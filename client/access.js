@@ -5,12 +5,12 @@ export function safeReturnTo(value, fallback = '/workspace') {
     const decoded = decodeURIComponent(value);
     if (/[\\\u0000-\u001f\u007f]/.test(decoded) || decoded.startsWith('//')) return fallback;
     const url = new URL(value, window.location.origin);
-    if (url.origin !== window.location.origin || !['/', '/workspace', '/join', '/join/status', '/admin/join-requests', '/admin/access-policy'].includes(url.pathname)) return fallback;
+    if (url.origin !== window.location.origin || !['/', '/workspace', '/join', '/admin/access-policy'].includes(url.pathname)) return fallback;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch { return fallback; }
 }
-export function authUrl(intent = 'login', returnTo = '/workspace') {
-  return `/auth/github?${new URLSearchParams({ intent: intent === 'register' ? 'register' : 'login', returnTo: safeReturnTo(returnTo) })}`;
+export function authUrl(returnTo = '/workspace') {
+  return `/auth/github?${new URLSearchParams({ returnTo: safeReturnTo(returnTo) })}`;
 }
 export const publicReasons = {
   disabled: '公开概览暂未开放', unverified: '仓库公开性尚未核验', private: '仓库当前不可公开访问',

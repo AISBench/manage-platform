@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { getSetting,setSetting } from '../server/db.js';
 import { publicItem } from '../server/public-service.js';
 import { httpFixture,testItem } from './helpers.js';
-import { verifiedIdentity,createRegistrationSession,getAccessPolicy,submitApplication } from '../server/registration.js';
+import { getAccessPolicy } from '../server/access-policy.js';
 
 const metadata=(extra={})=>({id:4242,full_name:'AISBench/benchmark',private:false,visibility:'public',...extra});
 const sensitiveItem=()=>testItem({body:'private-body-never-public',ownerMemberId:'private-owner',workflow:'blocked',priority:'high',dueAt:'2027-01-01T00:00:00Z',module:'secret-module',notifications:['private'],url:'https://evil.example/steal',labels:['bug']});
@@ -26,7 +26,7 @@ test('anonymous guest creates no session/cookie and public endpoint has only all
 
 test('guest cannot use member, admin, mutation APIs or query internal fields',async t=>{
   const f=await populated(t),guest=f.client(null);
-  for(const route of ['/api/items','/api/dashboard','/api/assignable-members','/api/members','/api/notifications','/api/admin/join-requests','/api/admin/access-policy']) assert.equal((await guest.request(route)).status,401,route);
+  for(const route of ['/api/items','/api/dashboard','/api/assignable-members','/api/members','/api/notifications','/api/admin/access-policy']) assert.equal((await guest.request(route)).status,401,route);
   assert.equal((await guest.request('/api/sync','POST',{})).status,401);
   for(const query of ['ownerMemberId=secret','module=secret','priority=high','workflow=done','pageSize=1000','sort=owner']) assert.equal((await guest.request('/api/public/items?'+query)).status,400,query);
   assert.equal((await guest.request('/api/public/overview?owner=secret')).status,400);

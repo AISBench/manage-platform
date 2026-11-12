@@ -11,17 +11,15 @@ import { createServices, isParticipant } from './services.js';
 import { verifyGitHubSignature, identityId } from './integrations/github.js';
 import { exchangeFeishuCode, feishuAuthorizeUrl, sendFeishuMessage } from './integrations/feishu.js';
 import { requestJson } from './integrations/http.js';
-import { resolveGitHubUser, createMember, getMemberView, listMemberViews, updateMember, setMemberStatus } from './members.js';
-import { verifiedIdentity,createRegistrationSession,getRegistrationStatus,submitApplication,listJoinRequests,reviewApplication,getAccessPolicy,updateAccessPolicy } from './registration.js';
+import { autoProvisionMemberInTransaction, githubAvatar, getMemberView, listMemberViews, updateMember, setMemberStatus } from './members.js';
+import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const version=z.number().int().positive(), id=z.string().min(1).max(100), short=z.string().trim().max(120);
-const login=z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/);
 const ruleSchema=z.object({enabled:z.boolean(),staleHours:z.number().int().min(1).max(8760),reminderCooldownHours:z.number().int().min(1).max(720)}).strict();
 const time=z.union([z.literal(''),z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)]);
 const preferenceSchema=z.object({notificationsEnabled:z.boolean(),quietStart:time,quietEnd:time}).strict().refine(p=>Boolean(p.quietStart)===Boolean(p.quietEnd));
 const itemPatch=z.object({version,workflow:z.enum(['todo','in_progress','blocked','done']).optional(),ownerMemberId:z.union([id,z.null()]).optional(),priority:z.enum(['low','normal','high']).optional(),dueAt:z.union([z.iso.datetime({offset:true}),z.null()]).optional()}).strict().refine(v=>Object.keys(v).length>1);
-const createSchema=z.object({githubLogin:login,expectedGithubId:z.string().regex(/^[1-9]\d*$/),displayName:short.default(''),module:short.default(''),notes:z.string().max(2000).default(''),role:z.enum(['admin','member']).default('member'),approvePendingRequest:z.boolean().default(false)}).strict();
 const memberPatch=z.object({version,displayName:short.optional(),module:short.optional(),notes:z.string().max(2000).optional(),role:z.enum(['admin','member']).optional()}).strict().refine(v=>Object.keys(v).length>1);
 function pagination(query) {return {page:z.coerce.number().int().min(1).max(100000).parse(query.page||1),pageSize:z.coerce.number().int().min(1).max(100).parse(query.pageSize||20)};}
 const iso=()=>new Date().toISOString();
@@ -37,14 +35,9 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   const app=express();app.disable('x-powered-by');app.set('trust proxy',config.trustProxy || false);
   const allItems=()=>listItems(db,Date.now(),config.feishuAppId || '');
   const memberView=memberId=>getMemberView(db,memberId,{appId:config.feishuAppId || ''});
-  function requireApplicant(req,res,next) {
-    if(!req.registrationIdentity||!req.registrationSession||req.user) return res.status(401).json({error:'请先通过 GitHub 验证申请身份'});
-    next();
-  }
   function clearBrowserSessions(req,res) {
     const jar=cookies(req);
     if(jar.triage_session) db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hashToken(jar.triage_session));
-    if(jar.triage_registration) db.prepare('DELETE FROM registration_sessions WHERE token_hash=?').run(hashToken(jar.triage_registration));
     for(const name of ['triage_session','triage_registration']) res.clearCookie(name,{path:'/',secure:config.secure,sameSite:'lax'});
   }
   function safeReturnTo(value) {
@@ -54,12 +47,14 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   function signInMember(profile,req,res) {
     const githubId=identityId(profile.githubId ?? profile.id);
     const userId=transact(()=>{
-      const member=db.prepare('SELECT * FROM members WHERE github_user_id=?').get(githubId);
-      if(!member||member.status==='disabled') throw fail(403,'该账号尚未获准或已停用，请联系管理员');
+      // GitHub login links or creates the member account automatically; no
+      // application or administrator approval is involved.
+      const member=autoProvisionMemberInTransaction(db,{profile:{...profile,githubId},requestId:req.requestId});
+      const avatar=config.demo ? (profile.avatarUrl || '') : githubAvatar({...profile,githubId});
       const existing=db.prepare('SELECT id FROM users WHERE member_id=?').get(member.id),uid=existing?.id || githubId;
       db.prepare('UPDATE users SET login=? WHERE login=? COLLATE NOCASE AND id<>?').run(`archived-${randomUUID()}`,profile.login,uid);
-      db.prepare('INSERT INTO users(id,member_id,login,name,avatar_url) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET member_id=excluded.member_id,login=excluded.login,name=excluded.name,avatar_url=excluded.avatar_url').run(uid,member.id,profile.login,profile.name || profile.login,profile.avatarUrl || profile.avatar_url || '');
-      db.prepare("UPDATE members SET github_login=?,status='active',first_login_at=COALESCE(first_login_at,?),last_login_at=?,updated_at=?,version=version+1 WHERE id=?").run(profile.login,iso(),iso(),iso(),member.id);
+      db.prepare('INSERT INTO users(id,member_id,login,name,avatar_url) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET member_id=excluded.member_id,login=excluded.login,name=excluded.name,avatar_url=excluded.avatar_url').run(uid,member.id,profile.login,profile.name || profile.login,avatar);
+      db.prepare("UPDATE members SET github_login=?,avatar_url=?,status='active',first_login_at=COALESCE(first_login_at,?),last_login_at=?,updated_at=?,version=version+1 WHERE id=?").run(profile.login,avatar,iso(),iso(),iso(),member.id);
       addAudit(db,{actorId:member.id,action:member.status==='pending_activation'?'member.activate':'auth.login',targetType:'member',targetId:member.id,requestId:req.requestId});
       clearBrowserSessions(req,res);return uid;
     });
@@ -81,15 +76,6 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(!current||current.status!=='active'||!valid) throw fail(401,'成员或会话已失效，请重新登录');
     if(admin&&current.role!=='admin') throw fail(403,'管理员权限已失效');
     return current;
-  }
-  async function resolveLogin(value) {
-    const checked=login.parse(value);
-    if(config.demo) {
-      const fixtures={'demo-maintainer':['1001','演示维护者'],'reviewer-chen':['1002','陈同学'],'pending-lin':['1003','林同学'],'disabled-wang':['1004','王同学'],'new-contributor':['1005','新贡献者'],'demo-applicant':['3001','演示申请者']};
-      const match=fixtures[checked.toLowerCase()];if(!match) throw fail(404,'演示模式仅提供 new-contributor 等固定模拟账号，不访问 GitHub');
-      return {githubId:match[0],login:checked.toLowerCase(),name:match[1],avatarUrl:'',url:`https://github.com/${checked.toLowerCase()}`,type:'User'};
-    }
-    return (integrations.resolveUser || resolveGitHubUser)({login:checked,token:config.githubToken,fetchImpl});
   }
   function transact(fn) {db.exec('BEGIN IMMEDIATE');try {const result=fn();db.exec('COMMIT');return result;} catch(error) {db.exec('ROLLBACK');throw error;}}
   function mutateItem(req,itemId,patch,{claim=false}={}) {
@@ -136,8 +122,8 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use(['/api','/auth'],(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
-    const policy=getAccessPolicy(db),applicant=!req.user&&req.registrationIdentity?getRegistrationStatus(db,req.registrationIdentity.id):null;
-    res.json({mode:req.user?'member':applicant?'applicant':'guest',user:req.user || null,applicant,csrfToken:req.session?.csrf || req.registrationSession?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{registrationEnabled:policy.registrationEnabled,publicOverviewEnabled:policy.publicOverviewEnabled}});
+    const policy=getAccessPolicy(db);
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
@@ -149,26 +135,14 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(req.headers.origin!==config.baseUrl||req.headers['x-demo-intent']!=='1') return res.status(403).json({error:'请通过明确的演示入口操作'});
     next();
   }
-  app.post('/auth/demo/applicant',demoGuard,(req,res)=>{
-    z.object({}).strict().parse(req.body);clearBrowserSessions(req,res);
-    const identity=verifiedIdentity(db,{githubId:'3001',login:'demo-applicant',name:'演示申请者',avatarUrl:'',type:'User'});
-    createRegistrationSession(db,res,identity.id,config);res.json({next:'/join',demo:true});
-  });
   app.post('/auth/demo/member',demoGuard,(req,res)=>{
-    const body=z.object({login:z.enum(['demo-maintainer','reviewer-chen','demo-applicant'])}).strict().parse(req.body);
-    const githubId={'demo-maintainer':'1001','reviewer-chen':'1002','demo-applicant':'3001'}[body.login];
+    const body=z.object({login:z.enum(['demo-maintainer','reviewer-chen'])}).strict().parse(req.body);
+    const githubId={'demo-maintainer':'1001','reviewer-chen':'1002'}[body.login];
     signInMember({githubId,login:body.login,name:body.login,avatarUrl:'',type:'User'},req,res);res.json({next:'/workspace',demo:true});
-  });
-  app.use('/api/registration',rateLimit({windowMs:60000,limit:120}));
-  app.get('/api/registration/status',requireApplicant,(req,res)=>{z.object({}).strict().parse(req.query);res.json(getRegistrationStatus(db,req.registrationIdentity.id));});
-  app.post('/api/registration/applications',requireApplicant,csrfGuard(config),rateLimit({windowMs:60000,limit:10}),rateLimit({windowMs:60000,limit:3,keyGenerator:req=>`registration:${req.registrationIdentity.id}`}), (req,res)=>{
-    const body=z.object({displayName:short.default(''),module:short.default(''),reason:z.string().trim().min(10).max(2000),consent:z.literal(true)}).strict().parse(req.body);
-    res.status(201).json({application:submitApplication(db,req.registrationIdentity.id,body,{requestId:req.requestId})});
   });
   app.get('/auth/github',(req,res)=>{
     if(config.demo) return res.redirect('/');
-    const intent=z.enum(['login','register']).parse(req.query.intent || 'login');
-    const context=JSON.stringify({intent,returnTo:safeReturnTo(req.query.returnTo)});
+    const context=JSON.stringify({returnTo:safeReturnTo(req.query.returnTo)});
     const state=newOAuthState(db,res,'github',null,config,context),url=new URL('https://github.com/login/oauth/authorize');
     url.search=new URLSearchParams({client_id:config.githubClientId,redirect_uri:`${config.baseUrl}/auth/github/callback`,state,scope:'read:user'}).toString();res.redirect(url.toString());
   });
@@ -181,17 +155,10 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const {data:profile}=await requestJson('https://api.github.com/user',{fetchImpl,headers:{Authorization:`Bearer ${token.access_token}`,Accept:'application/vnd.github+json','User-Agent':'aisbench-triage','X-GitHub-Api-Version':'2022-11-28'},label:'GitHub identity'});
     const githubId=identityId(profile.id);if(!githubId||typeof profile.login!=='string'||profile.type!=='User') throw fail(502,'无效 GitHub 个人身份');
     const member=db.prepare('SELECT status FROM members WHERE github_user_id=?').get(githubId);
-    if(member?.status==='disabled') throw fail(403,'该成员已停用，请联系管理员；不能通过重新申请恢复访问');
-    if(member) {
-      signInMember(profile,req,res);
-      const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);url.searchParams.set('auth','success');
-      return res.redirect(url.pathname+url.search+url.hash);
-    }
-    clearBrowserSessions(req,res);
-    const identity=verifiedIdentity(db,{githubId,login:profile.login,name:profile.name || profile.login,avatarUrl:profile.avatar_url || '',type:'User'});
-    createRegistrationSession(db,res,identity.id,config);
-    const status=getRegistrationStatus(db,identity.id),join=status.application?'/join/status':'/join',returnTo=safeReturnTo(context?.returnTo);
-    res.redirect(returnTo==='/workspace'?join:`${join}?${new URLSearchParams({returnTo})}`);
+    if(member?.status==='disabled') throw fail(403,'该成员已停用，请联系管理员');
+    signInMember(profile,req,res);
+    const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);url.searchParams.set('auth','success');
+    res.redirect(url.pathname+url.search+url.hash);
   });
   app.get('/auth/feishu/bind',requireUser,(req,res)=>{
     if(config.demo) return res.redirect('/?error=演示模式不连接真实飞书');
@@ -221,13 +188,13 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     });
     addActivity(db,'飞书账号已绑定，待发送测试消息',req.user.login);res.redirect('/workspace?auth=success');
   });
-  app.post('/auth/logout',(req,res,next)=>{if(!req.user&&!req.registrationSession) return res.status(401).json({error:'当前没有可退出的会话'});next();},csrfGuard(config),(req,res)=>{
+  app.post('/auth/logout',(req,res,next)=>{if(!req.user) return res.status(401).json({error:'当前没有可退出的会话'});next();},csrfGuard(config),(req,res)=>{
     clearBrowserSessions(req,res);res.json({ok:true});
   });
   app.use('/api',requireUser,csrfGuard(config),rateLimit({windowMs:60000,limit:240}));
   app.get('/api/dashboard',(req,res)=>{
     const items=allItems(),open=items.filter(i=>i.state==='open');
-    res.json({stats:{openIssues:open.filter(i=>i.kind==='issue').length,openPRs:open.filter(i=>i.kind==='pr').length,overdue:open.filter(i=>i.overdue).length,myTasks:open.filter(i=>i.workflow!=='done'&&isParticipant(i,req.user)).length,unassigned:open.filter(i=>!i.ownerMemberId).length,ownerIssues:open.filter(i=>i.ownerIssue).length,needsReview:open.filter(i=>i.needsReview).length,...(req.user.isAdmin?{pendingApplications:db.prepare("SELECT COUNT(*) AS n FROM join_requests WHERE status='pending'").get().n}:{})},items,activity:db.prepare('SELECT id,title,detail,created_at AS createdAt FROM activity ORDER BY created_at DESC LIMIT 20').all(),lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError')});
+    res.json({stats:{openIssues:open.filter(i=>i.kind==='issue').length,openPRs:open.filter(i=>i.kind==='pr').length,overdue:open.filter(i=>i.overdue).length,myTasks:open.filter(i=>i.workflow!=='done'&&isParticipant(i,req.user)).length,unassigned:open.filter(i=>!i.ownerMemberId).length,ownerIssues:open.filter(i=>i.ownerIssue).length,needsReview:open.filter(i=>i.needsReview).length},items,activity:db.prepare('SELECT id,title,detail,created_at AS createdAt FROM activity ORDER BY created_at DESC LIMIT 20').all(),lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError')});
   });
   app.get('/api/items',(req,res)=>{
     let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module}=req.query;
@@ -252,24 +219,11 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.post('/api/sync',requireAdmin,async(req,res)=>{fresh(req,true);const result=await services.sync();audit(req,'integration.sync','repository',config.repo);res.json(result);});
   app.get('/api/assignable-members',(_req,res)=>res.json({members:listMemberViews(db,{appId:config.feishuAppId || '',includeNotes:false}).filter(m=>m.status!=='disabled').map(m=>({id:m.id,githubId:m.githubId,login:m.login,name:m.displayName||m.name,module:m.module,status:m.status,reachable:m.reachable}))}));
   app.get('/api/members',requireAdmin,(_req,res)=>res.json({members:listMemberViews(db,{appId:config.feishuAppId || ''})}));
-  app.get('/api/admin/github-users/resolve',requireAdmin,rateLimit({windowMs:60000,limit:20}),async(req,res)=>{
-    const profile=await resolveLogin(req.query.login);fresh(req,true);
-    const pending=db.prepare("SELECT r.id FROM join_requests r JOIN registration_identities i ON i.id=r.identity_id WHERE i.github_user_id=? AND r.status='pending'").get(profile.githubId);
-    res.json({profile:{...profile,pendingApplicationId:pending?.id || null}});
-  });
-  app.get('/api/admin/join-requests',requireAdmin,(req,res)=>{
-    const query=z.object({status:z.enum(['','pending','approved','rejected']).default(''),q:z.string().max(200).default(''),page:z.coerce.number().int().min(1).max(100000).default(1),pageSize:z.coerce.number().int().min(1).max(100).default(20)}).strict().parse(req.query);
-    res.json(listJoinRequests(db,query));
-  });
-  for(const [action,decision] of [['approve','approved'],['reject','rejected']]) app.post(`/api/admin/join-requests/:id/${action}`,requireAdmin,(req,res)=>{
-    fresh(req,true);const body=z.object({version,publicFeedback:z.string().max(500).default(''),internalNote:z.string().max(2000).default('')}).strict().parse(req.body);
-    res.json({request:reviewApplication(db,req.params.id,{...body,decision},{actorId:req.member.id,requestId:req.requestId})});
-  });
   app.get('/api/admin/access-policy',requireAdmin,(_req,res)=>{
     const status=services.publicPortal.inspect();res.json({policy:getAccessPolicy(db),publicStatus:{available:status.available,reason:status.reason,checkedAt:status.checkedAt}});
   });
   app.put('/api/admin/access-policy',requireAdmin,async(req,res)=>{
-    const body=z.object({version,registrationEnabled:z.boolean(),publicOverviewEnabled:z.boolean(),reapplyCooldownHours:z.number().int().min(1).max(720),maxPendingRequests:z.number().int().min(1).max(10000)}).strict().parse(req.body);
+    const body=z.object({version,publicOverviewEnabled:z.boolean()}).strict().parse(req.body);
     const before=getAccessPolicy(db);
     if(body.publicOverviewEnabled&&!before.publicOverviewEnabled) {
       const visibility=await services.publicPortal.checkVisibility({force:true});
@@ -287,12 +241,6 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(status) members=members.filter(m=>m.status===status);if(role) members=members.filter(m=>m.role===role);if(module) members=members.filter(m=>m.module===module);
     if(bound==='true'||bound==='false') members=members.filter(m=>m.feishuBound===(bound==='true'));
     res.json({members:members.slice((page-1)*pageSize,page*pageSize),total:members.length,page,pageSize});
-  });
-  app.post('/api/admin/members',requireAdmin,rateLimit({windowMs:60000,limit:20}),async(req,res)=>{
-    const body=createSchema.parse(req.body),profile=await resolveLogin(body.githubLogin);
-    if(profile.githubId!==body.expectedGithubId) throw fail(409,'GitHub 账号对应身份已变化，请重新查询确认');
-    fresh(req,true);const created=createMember(db,{profile,displayName:body.displayName,module:body.module,notes:body.notes,role:body.role,approvePendingRequest:body.approvePendingRequest,actorId:req.member.id,requestId:req.requestId});
-    res.status(201).json({member:memberView(created.id)});
   });
   app.patch('/api/admin/members/:id',requireAdmin,(req,res)=>{fresh(req,true);const member=updateMember(db,req.params.id,memberPatch.parse(req.body),{actorId:req.member.id,requestId:req.requestId});res.json({member:memberView(member.id)});});
   for(const [action,enabled] of [['disable',false],['enable',true]]) app.post(`/api/admin/members/:id/${action}`,requireAdmin,(req,res)=>{

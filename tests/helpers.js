@@ -2,14 +2,14 @@ import { openDatabase, seedDemo, setSetting } from '../server/db.js';
 import { createApp } from '../server/app.js';
 import { createSession } from '../server/auth.js';
 import { loadConfig } from '../server/config.js';
-import { createMember } from '../server/members.js';
+import { autoProvisionMemberInTransaction } from '../server/members.js';
 
 export const configForTests=overrides=>({...loadConfig({DEMO_MODE:'true'}),demo:false,githubClientId:'test-id',githubClientSecret:'test-secret',feishuAppId:'cli_test',feishuAppSecret:'test-secret',...overrides});
 export function addTestMember(db,{githubId='501',login='alice',role='member',status='active',memberId}={}) {
-  const created=createMember(db,{profile:{githubId,login,type:'User'},role});
   if(memberId) throw new Error('Use returned generated member id');
-  db.prepare('UPDATE members SET status=?,first_login_at=?,last_login_at=? WHERE id=?').run(status,status==='active'?new Date().toISOString():null,status==='active'?new Date().toISOString():null,created.id);
-  if(status==='active') db.prepare('INSERT INTO users(id,member_id,login,name) VALUES (?,?,?,?)').run(githubId,created.id,login,login);
+  const created=autoProvisionMemberInTransaction(db,{profile:{githubId,login,type:'User'}});
+  db.prepare('UPDATE members SET role=?,status=?,first_login_at=?,last_login_at=? WHERE id=?').run(role,status,status==='active'?new Date().toISOString():null,status==='active'?new Date().toISOString():null,created.id);
+  if(status==='active') db.prepare('INSERT OR REPLACE INTO users(id,member_id,login,name) VALUES (?,?,?,?)').run(githubId,created.id,login,login);
   return db.prepare('SELECT * FROM members WHERE id=?').get(created.id);
 }
 export function bindTestMember(db,memberId,appId='cli_test',openId=`ou_${memberId}`) {

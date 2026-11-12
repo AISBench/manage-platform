@@ -4,27 +4,20 @@ test.beforeEach(async({page})=>{await page.goto('/');await page.getByRole('butto
 
 async function nav(page,name) {await page.getByRole('navigation',{name:'主导航'}).getByRole('button',{name,exact:true}).click();}
 
-test('administrator resolves, confirms, creates, edits, disables and enables pre-entered member',async({page})=>{
+test('administrator edits, disables and enables an auto-provisioned member',async({page})=>{
   await page.goto('/workspace');await nav(page,'团队成员');await expect(page.getByRole('heading',{name:'团队成员',exact:true})).toBeVisible();
-  await page.getByRole('button',{name:'新增成员',exact:true}).click();
-  let dialog=page.getByRole('dialog',{name:'预录入团队成员'});
-  await dialog.getByLabel('GitHub 用户名').fill('new-contributor');await dialog.getByRole('button',{name:'核验账号',exact:true}).click();
-  await expect(dialog.getByText('GitHub ID: 1005',{exact:true})).toBeVisible();
-  await dialog.getByRole('checkbox').check();await dialog.getByLabel('团队姓名 / 昵称').fill('测试预录入成员');await dialog.getByLabel('负责模块',{exact:true}).fill('模型适配');
-  const created=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/api/admin/members'));
-  await dialog.getByRole('button',{name:'确认录入',exact:true}).click();expect((await created).status()).toBe(201);
-  const row=page.getByRole('row').filter({hasText:'new-contributor'});await expect(row.getByText('待激活',{exact:true})).toBeVisible();
-  await row.getByRole('button',{name:'编辑',exact:true}).click();dialog=page.getByRole('dialog',{name:'编辑成员资料'});
+  const row=page.getByRole('row').filter({hasText:'demo-reviewer'});
+  await row.getByRole('button',{name:'编辑',exact:true}).click();const dialog=page.getByRole('dialog',{name:'编辑成员资料'});
   await dialog.getByLabel('团队姓名 / 昵称').fill('更新后的团队姓名');await dialog.getByRole('button',{name:'保存资料'}).click();await expect(row.getByText('更新后的团队姓名',{exact:true})).toBeVisible();
-  await row.getByRole('button',{name:'停用',exact:true}).click();dialog=page.getByRole('dialog',{name:'确认停用成员'});await dialog.getByRole('button',{name:'确认停用',exact:true}).click();await expect(row.getByText('已停用',{exact:true})).toBeVisible();
-  await row.getByRole('button',{name:'启用',exact:true}).click();dialog=page.getByRole('dialog',{name:'重新启用成员'});await dialog.getByRole('button',{name:'确认启用',exact:true}).click();await expect(row.getByText('待激活',{exact:true})).toBeVisible();
+  await row.getByRole('button',{name:'停用',exact:true}).click();const confirm=page.getByRole('dialog',{name:'确认停用成员'});await confirm.getByRole('button',{name:'确认停用',exact:true}).click();await expect(row.getByText('已停用',{exact:true})).toBeVisible();
+  await row.getByRole('button',{name:'启用',exact:true}).click();await page.getByRole('dialog',{name:'重新启用成员'}).getByRole('button',{name:'确认启用',exact:true}).click();await expect(row.getByText('正常',{exact:true})).toBeVisible();
   await page.getByLabel('成员状态',{exact:true}).selectOption('disabled');await expect(row).toHaveCount(0);await page.getByLabel('成员状态',{exact:true}).selectOption('');
   const admin=page.getByRole('row').filter({hasText:'demo-maintainer'});await admin.getByRole('button',{name:'停用',exact:true}).click();
   const rejected=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/demo-admin/disable'));
   await page.getByRole('dialog').getByRole('button',{name:'确认停用',exact:true}).click();expect((await rejected).status()).toBe(409);
   await expect(page.getByRole('dialog').getByRole('alert')).toBeVisible();await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
-  await nav(page,'操作审计');await expect(page.getByRole('heading',{name:'操作审计',exact:true})).toBeVisible();await page.getByLabel('审计操作类型').fill('member.create');await expect(page.getByRole('cell',{name:'member.create',exact:true}).first()).toBeVisible();
-  await nav(page,'运行状态');await expect(page.getByRole('heading',{name:'运行状态',exact:true})).toBeVisible();await expect(page.getByText('Schema v3',{exact:true})).toBeVisible();
+  await nav(page,'操作审计');await expect(page.getByRole('heading',{name:'操作审计',exact:true})).toBeVisible();await page.getByLabel('审计操作类型').fill('member.update');await expect(page.getByRole('cell',{name:'member.update',exact:true}).first()).toBeVisible();
+  await nav(page,'运行状态');await expect(page.getByRole('heading',{name:'运行状态',exact:true})).toBeVisible();await expect(page.getByText('Schema v4',{exact:true})).toBeVisible();
 });
 
 test('versioned bulk assignment and stale drawer conflict reload are functional',async({page})=>{

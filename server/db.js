@@ -30,7 +30,7 @@ export function openDatabase(filename) {
     try {
       db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 3)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 4)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -92,7 +92,14 @@ export function openDatabase(filename) {
           CREATE TABLE public_items (number INTEGER PRIMARY KEY, data TEXT NOT NULL, generation TEXT NOT NULL);`);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(3, new Date().toISOString());
       }
-      db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ registrationEnabled: true, publicOverviewEnabled: false, reapplyCooldownHours: 24, maxPendingRequests: 1000, version: 1 }));
+      if (!applied.has(4)) {
+        // The platform avatar mirrors the GitHub profile; keep it on the member
+        // so member listings do not depend on the legacy users row.
+        addColumn(db, 'members', 'avatar_url', "TEXT NOT NULL DEFAULT ''");
+        db.exec(`UPDATE members SET avatar_url=COALESCE((SELECT avatar_url FROM users WHERE users.member_id=members.id),'') WHERE avatar_url=''`);
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(4, new Date().toISOString());
+      }
+      db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
