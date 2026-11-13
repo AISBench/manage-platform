@@ -104,7 +104,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     return updated;
   }
   app.use((req,res,next)=>{req.requestId=randomUUID();res.set('X-Request-ID',req.requestId);next();});
-  app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'",'https://avatars.githubusercontent.com','data:'],connectSrc:["'self'"],upgradeInsecureRequests:config.secure?[]:null}},strictTransportSecurity:config.secure?undefined:false}));
+  app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'",'https://avatars.githubusercontent.com','https://github.com','https://*.githubusercontent.com','https://github-production-user-asset-6210df.s3.amazonaws.com','data:'],connectSrc:["'self'"],upgradeInsecureRequests:config.secure?[]:null}},strictTransportSecurity:config.secure?undefined:false}));
   app.get('/api/health',(_req,res)=>res.json({ok:true}));
   app.post('/api/webhooks/github',rateLimit({windowMs:60000,limit:120}),express.raw({type:'application/json',limit:'2mb'}),(req,res)=>{
     if(config.demo) throw fail(400,'演示模式不接收外部事件');
