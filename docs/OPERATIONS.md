@@ -53,16 +53,16 @@ HTTPS 可参考 [宿主机 Caddy 样例](../deploy/Caddyfile.example)。Caddy �
 
 ## 3. 真实集成验收
 
-1. GitHub OAuth 回调为 `BASE_URL/auth/github/callback`。管理员正常登录，陌生账号不被自动注册。
-2. 网页核验并预录入测试成员，成员首次登录激活。测试改名仍按固定 ID 识别。
+1. GitHub OAuth 回调为 `BASE_URL/auth/github/callback`。首次登录自动创建普通成员；首个管理员通过本地 `bootstrap` 初始化。
+2. OAuth scope 使用 `read:user public_repo`（私有仓库用 `repo`），并配置 `TOKEN_ENCRYPTION_KEY`；成员在设置页确认"评论写权限已授权"。
 3. 仓库同步使用只读服务器凭证；先手动同步，核对开放 / 关闭事务与 PR CI。
-4. Webhook 回调为 `BASE_URL/api/webhooks/github`，配置随机 secret；观察 GitHub 投递与平台收件箱，验签失败必须拒绝。
+4. Webhook 回调为 `BASE_URL/api/webhooks/github`，配置随机 secret，订阅 Issues / Issue comments / Pull requests / Pull request reviews / Pull request review comments；需要实时 CI 时增加 Check runs、Check suites、Workflow runs。观察 GitHub 投递与平台收件箱，验签失败必须拒绝。
 5. 飞书自建应用发布、机器人和个人消息权限完成审批、测试成员纳入应用范围；回调为 `BASE_URL/auth/feishu/callback`。
 6. 成员本人绑定后发送测试消息。界面变为已验证、本人实际收到消息，才算通知通道验收成功。
 7. 确认初次同步不发送历史事件消息，规则仍默认关闭。
 8. 执行备份及隔离恢复演练，再由管理员启用提醒，先小范围试运行。
 
-无 Webhook 管理权限时，明确告知团队只使用轮询、平台分派和超期提醒，不宣称完整即时事件提醒。
+无 Webhook 管理权限时，明确告知团队评论与 CI 依赖打开会话的增量同步和 `CONVERSATION_POLL_MINUTES` 轮询兜底，不宣称完整即时事件提醒。
 
 ## 4. v0.1 升级
 

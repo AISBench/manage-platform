@@ -1,5 +1,6 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { getMemberView } from './members.js';
+import { githubTokenStatus } from './github-tokens.js';
 export const randomToken = () => randomBytes(32).toString('hex');
 export const hashToken = token => createHash('sha256').update(token).digest('hex');
 export function cookies(req) {
@@ -18,7 +19,8 @@ export function sessionUser(db,memberId,config) {
   const member=getMemberView(db,memberId,{appId:config.feishuAppId || '',includeNotes:false});
   const user=db.prepare('SELECT * FROM users WHERE member_id=?').get(memberId);
   if (!member || !user || member.status!=='active') return null;
-  return {id:user.id,memberId:member.id,githubId:member.githubId,login:member.login,name:member.displayName || member.name || member.login,avatarUrl:member.avatarUrl || '',isAdmin:member.role==='admin',role:member.role,status:member.status,module:member.module,feishuBound:member.feishuBound,feishuVerified:member.feishuVerified,notificationsEnabled:!!user.notifications_enabled,quietStart:user.quiet_start || '',quietEnd:user.quiet_end || ''};
+  const write=githubTokenStatus(db,memberId);
+  return {id:user.id,memberId:member.id,githubId:member.githubId,login:member.login,name:member.displayName || member.name || member.login,avatarUrl:member.avatarUrl || '',isAdmin:member.role==='admin',role:member.role,status:member.status,module:member.module,feishuBound:member.feishuBound,feishuVerified:member.feishuVerified,notificationsEnabled:!!user.notifications_enabled,quietStart:user.quiet_start || '',quietEnd:user.quiet_end || '',githubWriteReady:write.ready,githubWriteScopes:write.scopes};
 }
 export function createSession(db,res,userId,config) {
   const user=db.prepare('SELECT member_id FROM users WHERE id=?').get(userId);

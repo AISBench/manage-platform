@@ -6,6 +6,7 @@ Node.js 24+, Express, node:sqlite, React/Vite. Single-team/repository/instance. 
 
 - JSON errors: `{error, requestId?}`; 400 invalid input, 401 session invalid, 403 unauthorized, 409 version/business conflict, 429 backoff/rate limit.
 - Member business APIs require an active member/session. Anonymous read-only APIs: GET `/api/health`, `/api/session`, `/api/public/overview`, `/api/public/items`. GitHub OAuth links or creates the member account on first login. Signed webhooks remain independent.
+- GitHub writes are limited to creating issue/PR comments with the member's encrypted OAuth token; the platform never merges, closes, labels, assigns or edits code. Tokens are never returned or logged, and are deleted on disable or local revocation.
 - Every browser mutation requires exact configured Origin and `X-CSRF-Token` from session. Signed webhooks use raw-body HMAC instead of browser CSRF.
 - Member ID / GitHub fixed ID determine authorization and routing; login strings are display snapshots only.
 - Never return complete Feishu open_id, integration secrets, OAuth access tokens or raw webhook payloads to the client.
@@ -32,7 +33,7 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 
 ## Identity shapes
 
-`SessionUser`: `{id,memberId,githubId,login,name,avatarUrl,isAdmin,role,status,module,feishuBound,feishuVerified,notificationsEnabled,quietStart,quietEnd}`.
+`SessionUser`: `{id,memberId,githubId,login,name,avatarUrl,isAdmin,role,status,module,feishuBound,feishuVerified,notificationsEnabled,quietStart,quietEnd,githubWriteReady,githubWriteScopes}`.
 
 `Member`: `{id,githubId,login,name,displayName,avatarUrl,module,notes?,role,status,version,firstLoginAt,lastLoginAt,createdAt,updatedAt,feishuBound,feishuVerified,notificationsEnabled,reachable}`. `notes` is administrator-only. `status` is pending_activation / active / disabled.
 
@@ -64,6 +65,25 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 | GET /api/assignable-members | `{members:[{id,githubId,login,name,module,status,reachable}]}`; excludes disabled, includes pending, no notes |
 
 Every item PATCH and claim needs current version. Local workflow never closes/merges/modifies GitHub. Explicit workflow changes acknowledge needsReview; priority-only changes do not.
+
+## Conversation
+
+| Method and route | Request / response |
+| --- | --- |
+| GET /api/items/:id/conversation | `{item,messages,events:{ci,operation},unread,sync,syncError?}`; query `before`, `limit≤100`, `refresh=0|1`; messages newest-first, long bodies are collapsed by the client |
+| POST /api/items/:id/conversation/sync | Member; force incremental GitHub sync of comments/reviews/timeline/CI |
+| POST /api/items/:id/messages | `{body,clientId?}` →201 `{message}`; comments are posted to GitHub as the member; 409 `GITHUB_WRITE_AUTH_REQUIRED` + `authUrl` when authorization is missing |
+| POST /api/items/:id/messages/:messageId/retry | Retry a failed local message, dedupe by clientId |
+| POST /api/items/:id/ci/:eventId/rerun | Member; re-run every job of the GitHub Actions workflow run behind this check as the member's own GitHub identity, falling back to `GITHUB_ACTIONS_TOKEN` only when the organization blocks OAuth Apps; response `{ok,runId,via:'member'\|'server'}`; 409 `CI_NOT_RERUNABLE` / `CI_RUN_ID_MISSING` / `GITHUB_WRITE_AUTH_REQUIRED`; commit statuses and non-Actions checks are rejected |
+| POST /api/items/:id/read | `{messageIds:[≤50]}` → `{marked}`; own messages are not recorded |
+| GET /api/items/:id/messages/:messageId/reads | `{members:[{memberId,displayName,login,avatarUrl,readAt}]}`; active members only |
+| GET /api/items/unread | `{items:{itemId:{unread,mentions,lastMessageAt}},total,mentions}` |
+| GET /api/items/search | `{items:[{id,number,kind,title,state}]}`; query `q≤100`, at most 8 lightweight rows for the `#` reference picker; no bodies |
+| POST /api/github/authorization/revoke | Delete the member's local GitHub write token; no GitHub-side revocation |
+
+`Message` DTO: `{id,source,kind,author:{memberId?,login,name,avatarUrl},body,createdAt,updatedAt,url,path,line,startLine?,side?,diffHunk?,reviewCommentId?,state,deliveryStatus,deliveryError,remoteDeleted,mentions:[{login,memberId?,isSelf}],readCount,readByMe}`. Inline `review_comment` messages also carry `path`, `line`, `startLine`, `side` (`LEFT`/`RIGHT`), `diffHunk`, `reviewCommentId` (GitHub review comment id) and `url`. The platform builds the jump target as `<itemUrl>/changes#r<reviewCommentId>`, because GitHub resolves `#discussion_r<id>` on the PR root to the Conversation tab instead of Files changed. `Event` DTO: `{id,category,type,actor,summary,detail,occurredAt}`.
+
+`GET /api/items` and `/api/dashboard` add `unreadCount`, `mentionCount`, `lastMessageAt` per item and `stats.unreadMessages` / `stats.mentions`. Conversation writes require active member + Origin + CSRF and are rate limited; read receipts are platform-member-only and never infer GitHub-side readers.
 
 ## Administrator membership
 

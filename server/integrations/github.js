@@ -37,6 +37,7 @@ export function normalizeIssue(issue, pull) {
   if (isPR) {
     item.draft = Boolean(pull?.draft ?? issue.draft);
     item.mergeableState = typeof pull?.mergeable_state === 'string' ? pull.mergeable_state : 'unknown';
+    if (typeof pull?.head?.sha === 'string' && /^[a-fA-F0-9]{7,64}$/.test(pull.head.sha)) item.headSha = pull.head.sha;
     if (pull?.merged_at || issue.pull_request?.merged_at) item.merged = true;
   }
   return item;
@@ -182,3 +183,111 @@ export async function fetchRepositoryItems({ repo, token, fetchImpl = fetch, tim
   }
   return [...items.values()];
 }
+
+function repoBase(repo) {
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split('/').some(part => part === '.' || part === '..')) {
+    throw new IntegrationError('Invalid GitHub repository');
+  }
+  return `${API}/repos/${repo}`;
+}
+function issueNumber(number) {
+  if (!Number.isSafeInteger(number) || number < 1) throw new IntegrationError('Invalid GitHub issue number');
+  return number;
+}
+function refValue(ref) {
+  if (typeof ref !== 'string' || !/^[a-fA-F0-9]{7,64}$/.test(ref)) throw new IntegrationError('GitHub returned invalid PR head');
+  return ref;
+}
+function reader(repo, token, fetchImpl, timeoutMs = 15000) {
+  const base = repoBase(repo);
+  if (token !== undefined && token !== null && token !== '') requiredString(token, 'GitHub token');
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return { base, request: url => requestJson(url, { fetchImpl, timeoutMs, headers, method: 'GET', label: 'GitHub' }) };
+}
+
+export async function fetchIssueComments({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/issues/${issueNumber(number)}/comments?per_page=100&page=1`, request, data => data);
+}
+export async function fetchPullReviews({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/pulls/${issueNumber(number)}/reviews?per_page=100&page=1`, request, data => data);
+}
+export async function fetchPullReviewComments({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/pulls/${issueNumber(number)}/comments?per_page=100&page=1`, request, data => data);
+}
+export async function fetchIssueTimeline({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/issues/${issueNumber(number)}/timeline?per_page=100&page=1`, request, data => data);
+}
+export async function fetchPullRequestDetail({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  const { data } = await request(`${base}/pulls/${issueNumber(number)}`);
+  if (!data || data.number !== number) throw new IntegrationError('GitHub returned invalid pull request data');
+  return data;
+}
+export async function fetchPullCheckRuns({ repo, ref, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/commits/${refValue(ref)}/check-runs?per_page=100&page=1&filter=latest`, request, data => data.check_runs);
+}
+export async function fetchCommitStatuses({ repo, ref, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/commits/${refValue(ref)}/statuses?per_page=100&page=1`, request, data => data);
+}
+
+export async function createIssueComment({ repo, number, token, body, fetchImpl = fetch }) {
+  const { base } = reader(repo, token, fetchImpl, 20000);
+  if (typeof body !== 'string' || !body.trim() || body.length > 65536 || body.includes('\u0000')) throw new IntegrationError('Invalid GitHub comment');
+  requiredString(token, 'GitHub write token');
+  const headers = { Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}` };
+  const { data } = await requestJson(`${base}/issues/${issueNumber(number)}/comments`, {
+    fetchImpl, timeoutMs: 20000, headers, method: 'POST', body: JSON.stringify({ body }), label: 'GitHub comment',
+  });
+  if (!data || !Number.isSafeInteger(data.id) || typeof data.html_url !== 'string' || typeof data.created_at !== 'string') {
+    throw new IntegrationError('GitHub returned invalid comment data');
+  }
+  return data;
+}
+
+// Re-run all jobs of a GitHub Actions workflow run. The endpoint answers 201
+// with an empty body, so requestJson (which requires JSON) cannot be reused.
+export async function rerunGitHubWorkflow({ repo, runId, token, fetchImpl = fetch }) {
+  const base = repoBase(repo);
+  requiredString(token, 'GitHub write token');
+  if (!Number.isSafeInteger(runId) || runId < 1) throw new IntegrationError('Invalid workflow run');
+  const headers = {
+    Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
+    'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}`,
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    let response;
+    try {
+      response = await fetchImpl(`${base}/actions/runs/${runId}/rerun`, {
+        method: 'POST', headers, body: JSON.stringify({}), redirect: 'error', signal: controller.signal,
+      });
+    } catch {
+      throw new IntegrationError('GitHub workflow rerun request failed');
+    }
+    if (!response?.ok) {
+      const status = response?.status;
+      const error = new IntegrationError(`GitHub workflow rerun failed${Number.isInteger(status) ? ` (HTTP ${status})` : ''}`, status);
+      if (status === 429 || (status === 403 && response.headers?.get('x-ratelimit-remaining') === '0')) {
+        const reset = Number(response.headers?.get('x-ratelimit-reset')) * 1000;
+        error.retryAt = Number.isFinite(reset) && reset > Date.now() ? reset : Date.now() + 60000;
+      } else if (status === 403) {
+        // Organization-level OAuth App restrictions reject writes before any
+        // repository permission check; distinguish it for actionable guidance.
+        try { if ((await response.text()).includes('OAuth App access restrictions')) error.code = 'GITHUB_ORG_RESTRICTED'; } catch { /* ignore */ }
+      }
+      throw error;
+    }
+    return { ok: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
