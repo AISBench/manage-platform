@@ -13,6 +13,13 @@ export function normalizeProfile(profile) {
   if ((typeof id === 'number' && (!Number.isSafeInteger(id) || id <= 0)) || String(id).trim() !== String(id) || !/^[1-9]\d*$/.test(String(id))) throw fail(400, 'Invalid GitHub fixed user ID', 'INVALID_PROFILE');
   return { githubId: String(id), login: profile.login, name: typeof profile.name === 'string' ? profile.name.slice(0, 500) : '', avatarUrl: typeof profile.avatarUrl === 'string' ? profile.avatarUrl : typeof profile.avatar_url === 'string' ? profile.avatar_url : '', type: 'User' };
 }
+// The platform avatar always mirrors GitHub. Reject foreign avatar hosts and
+// fall back to the stable numeric avatar URL when the profile omits one.
+export function githubAvatar(profile) {
+  profile = normalizeProfile(profile);
+  if (profile.avatarUrl.startsWith('https://avatars.githubusercontent.com/')) return profile.avatarUrl;
+  return `https://avatars.githubusercontent.com/u/${profile.githubId}?v=4`;
+}
 function text(value, name, max) {
   if (typeof value !== 'string' || value.length > max || value.includes('\u0000')) throw fail(400, `Invalid ${name}`, 'INVALID_INPUT');
   return value.trim();
@@ -69,14 +76,14 @@ export async function resolveGitHubUser({ login, token = '', fetchImpl = fetch }
 }
 
 export function getMemberView(db, id, { appId = '', includeNotes = true } = {}) {
-  const row = db.prepare(`SELECT m.*,u.name AS profile_name,u.avatar_url,u.notifications_enabled,
+  const row = db.prepare(`SELECT m.*,u.name AS profile_name,u.avatar_url AS profile_avatar_url,u.notifications_enabled,
     b.app_id,b.status AS binding_status,b.bound_at,b.verified_at,b.member_id AS binding_id
     FROM members m LEFT JOIN users u ON u.member_id=m.id LEFT JOIN feishu_bindings b ON b.member_id=m.id WHERE m.id=?`).get(id);
   if (!row) return null;
   const feishuBound = !!row.binding_id && row.app_id === appId;
   const feishuVerified = feishuBound && row.binding_status === 'active' && !!row.verified_at;
   return { id: row.id, githubId: row.github_user_id, login: row.github_login, name: row.profile_name || row.github_login,
-    displayName: row.display_name, avatarUrl: row.avatar_url || '', module: row.module, ...(includeNotes ? { notes: row.notes } : {}),
+    displayName: row.display_name, avatarUrl: row.avatar_url || row.profile_avatar_url || '', module: row.module, ...(includeNotes ? { notes: row.notes } : {}),
     role: row.role, status: row.status, version: row.version, firstLoginAt: row.first_login_at, lastLoginAt: row.last_login_at,
     createdAt: row.created_at, updatedAt: row.updated_at, feishuBound, feishuVerified,
     notificationsEnabled: !!row.notifications_enabled, reachable: row.status === 'active' && feishuVerified && !!row.notifications_enabled };
@@ -87,44 +94,22 @@ export function listMemberViews(db, options = {}) {
 function insertMember(db, { profile, displayName = '', module = '', notes = '', role = 'member', actorId = null, id = randomUUID(), status = 'pending_activation', firstLoginAt = null, lastLoginAt = null }) {
   const now = new Date().toISOString();
   if (db.prepare('SELECT id FROM members WHERE github_user_id=?').get(profile.githubId)) throw fail(409, 'GitHub identity already belongs to a member; edit or re-enable that record', 'DUPLICATE_IDENTITY');
-  db.prepare(`INSERT INTO members(id,github_user_id,github_login,display_name,module,notes,role,status,created_by,first_login_at,last_login_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, profile.githubId, profile.login, displayName, module, notes, role, status, actorId, firstLoginAt, lastLoginAt, now, now);
+  db.prepare(`INSERT INTO members(id,github_user_id,github_login,display_name,module,notes,role,status,created_by,first_login_at,last_login_at,avatar_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, profile.githubId, profile.login, displayName, module, notes, role, status, actorId, firstLoginAt, lastLoginAt, githubAvatar(profile), now, now);
   return id;
 }
-// Transaction-safe primitives: callers own BEGIN/COMMIT; never import registration here.
-export function assertActiveAdmin(db, actorId) {
-  const actor = typeof actorId === 'string' && db.prepare('SELECT * FROM members WHERE id=?').get(actorId);
-  if (!actor || actor.role !== 'admin' || actor.status !== 'active') throw fail(403, 'An active administrator is required', 'ADMIN_REQUIRED');
-  return actor;
-}
-export function grantMemberInTransaction(db, { profile, displayName = '', module = '', actorId = null, requestId = null }) {
+// Transaction-safe: callers own BEGIN/COMMIT. First GitHub login links (or
+// creates) an active member; no application or administrator approval needed.
+export function autoProvisionMemberInTransaction(db, { profile, requestId = null }) {
   profile = normalizeProfile(profile);
   const existing = db.prepare('SELECT * FROM members WHERE github_user_id=?').get(profile.githubId);
-  if (existing?.status === 'disabled') throw fail(409, 'Disabled member must be explicitly re-enabled', 'MEMBER_DISABLED');
+  if (existing?.status === 'disabled') throw fail(403, 'Disabled members must be re-enabled by an administrator', 'MEMBER_DISABLED');
   if (existing) return existing;
-  const id = insertMember(db, { profile, displayName, module, actorId });
+  const now = new Date().toISOString();
+  const id = insertMember(db, { profile, status: 'active', firstLoginAt: now, lastLoginAt: now });
   const member = db.prepare('SELECT * FROM members WHERE id=?').get(id);
-  addAudit(db, { actorId, action: 'member.create', targetType: 'member', targetId: id, after: auditMember(member), requestId });
+  addAudit(db, { action: 'member.auto_provision', targetType: 'member', targetId: id, after: auditMember(member), requestId });
   return member;
-}
-export function createMember(db, { profile, displayName = '', module = '', notes = '', role = 'member', actorId = null, requestId = null, approvePendingRequest = false }) {
-  profile = normalizeProfile(profile);
-  displayName = text(displayName, 'display name', 200); module = text(module, 'module', 200); notes = text(notes, 'notes', 4000); roleValue(role);
-  if (typeof approvePendingRequest !== 'boolean') throw fail(400, 'approvePendingRequest must be a boolean', 'INVALID_INPUT');
-  return transact(db, () => {
-    const pending = db.prepare(`SELECT r.* FROM join_requests r JOIN registration_identities i ON i.id=r.identity_id WHERE i.github_user_id=? AND r.status='pending'`).get(profile.githubId);
-    if (pending && !approvePendingRequest) throw fail(409, 'Explicit confirmation is required to approve the pending application', 'PENDING_APPLICATION');
-    if (pending) assertActiveAdmin(db, actorId);
-    const id = insertMember(db, { profile, displayName, module, notes, role, actorId });
-    addAudit(db, { actorId, action: 'member.create', targetType: 'member', targetId: id, after: auditMember(db.prepare('SELECT * FROM members WHERE id=?').get(id)), requestId });
-    if (pending) {
-      const changed = db.prepare(`UPDATE join_requests SET status='approved',reviewer_member_id=?,reviewed_at=?,member_id=?,version=version+1 WHERE id=? AND status='pending' AND version=?`)
-        .run(actorId, new Date().toISOString(), id, pending.id, pending.version);
-      if (Number(changed.changes) !== 1) throw fail(409, 'Application changed; refresh and retry', 'VERSION_CONFLICT');
-      addAudit(db, { actorId, action: 'registration.approve', targetType: 'join_request', targetId: pending.id, before: { status: pending.status, version: pending.version }, after: { status: 'approved', memberId: id, version: pending.version + 1, source: 'manual_member' }, requestId });
-    }
-    return getMemberView(db, id);
-  });
 }
 export function updateMember(db, id, changes, { actorId = null, requestId = null } = {}) {
   const allowed = new Set(['version', 'displayName', 'module', 'notes', 'role']);

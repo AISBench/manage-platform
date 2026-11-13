@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase, addAudit, getSetting, listItems, seedDemo, serializeUser } from '../server/db.js';
-import { createMember, getMemberView, listMemberViews, updateMember, setMemberStatus, provisionAdmin, resolveGitHubUser } from '../server/members.js';
+import { autoProvisionMemberInTransaction, getMemberView, listMemberViews, updateMember, setMemberStatus, provisionAdmin, resolveGitHubUser } from '../server/members.js';
 
 const profile = (id = '12345', login = 'alice') => ({ githubId: id, login, name: 'Alice', avatarUrl: 'https://avatars.githubusercontent.com/u/12345', type: 'User' });
 function database(t) { const db = openDatabase(':memory:'); t.after(() => db.close()); return db; }
+// Test helper: GitHub login auto-provisions an active member; optional profile
+// fields are applied afterwards to mirror administrator edits.
+function createMember(db, { profile, displayName = '', module = '', notes = '', role = 'member' }) {
+  const member = autoProvisionMemberInTransaction(db, { profile });
+  db.prepare('UPDATE members SET display_name=?,module=?,notes=?,role=? WHERE id=?').run(displayName, module, notes, role, member.id);
+  return getMemberView(db, member.id);
+}
 function activate(db, id) { db.prepare("UPDATE members SET status='active',first_login_at=?,last_login_at=? WHERE id=?").run('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', id); }
 function user(db, member, id = member.githubId) { db.prepare('INSERT INTO users(id,login,name,member_id) VALUES (?,?,?,?)').run(id, member.login, 'Profile name', member.id); }
 const status = expected => error => error.status === expected;
@@ -12,9 +19,10 @@ const status = expected => error => error.status === expected;
 test('member CRUD keys on fixed identity, not mutable or reused login; strict versions and private notes', t => {
   const db = database(t);
   const alice = createMember(db, { profile: profile(), displayName: 'Team Alice', module: 'core', notes: 'Admin only' });
-  assert.equal(alice.status, 'pending_activation'); assert.equal(alice.version, 1);
+  assert.equal(alice.status, 'active'); assert.equal(alice.version, 1);
   assert.equal(alice.reachable, false); assert.equal(alice.githubId, '12345');
-  assert.throws(() => createMember(db, { profile: profile('12345', 'renamed') }), status(409));
+  const reusedIdentity = createMember(db, { profile: profile('12345', 'renamed') });
+  assert.equal(reusedIdentity.id, alice.id, 'same fixed GitHub ID reuses the member');
   const reused = createMember(db, { profile: profile('67890', 'alice') });
   assert.notEqual(reused.id, alice.id);
   const updated = updateMember(db, alice.id, { version: 1, displayName: 'Edited', module: 'new module', notes: 'Kept' });
@@ -34,6 +42,7 @@ test('last activated administrator protected transactionally; pending admin is n
   const db = database(t);
   const admin = provisionAdmin(db, { profile: profile() }); activate(db, admin.id);
   const pending = createMember(db, { profile: profile('2', 'bob'), role: 'admin' });
+  db.prepare("UPDATE members SET status='pending_activation',first_login_at=NULL,last_login_at=NULL WHERE id=?").run(pending.id);
   assert.throws(() => updateMember(db, admin.id, { version: 1, role: 'member' }), error => error.code === 'LAST_ADMIN');
   assert.throws(() => setMemberStatus(db, admin.id, { version: 1, enabled: false }), error => error.code === 'LAST_ADMIN');
   assert.equal(getMemberView(db, admin.id).version, 1);
@@ -80,7 +89,7 @@ test('disable effects and audit rollback together on a database failure', t => {
   db.prepare('INSERT INTO sessions(token_hash,user_id,member_id,csrf,expires_at) VALUES (?,?,?,?,?)').run('t', member.githubId, member.id, 'c', Date.now());
   db.exec("CREATE TRIGGER reject_audit BEFORE INSERT ON audit_logs BEGIN SELECT RAISE(ABORT,'test failure'); END");
   assert.throws(() => setMemberStatus(db, member.id, { version: 1, enabled: false }));
-  assert.equal(getMemberView(db, member.id).status, 'pending_activation');
+  assert.equal(getMemberView(db, member.id).status, 'active');
   assert.equal(getMemberView(db, member.id).version, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n, 1);
 });
@@ -95,7 +104,6 @@ test('pending enable does not activate and bootstrap is once-only with explicit 
   const recovered = provisionAdmin(db, { profile: profile(), recover: true });
   assert.equal(recovered.id, admin.id); assert.equal(recovered.role, 'admin'); assert.equal(recovered.version, 4);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action='member.recover_admin'").get().n, 1);
-  assert.throws(() => createMember(db, { profile: { ...profile(), githubId: '9007199254740993' }, role: 'owner' }), status(400));
   const largeId = createMember(db, { profile: profile('9007199254740993', 'large-id') }); assert.equal(largeId.githubId, '9007199254740993');
 });
 

@@ -1,6 +1,5 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { getMemberView } from './members.js';
-import { readRegistrationSession } from './registration.js';
 export const randomToken = () => randomBytes(32).toString('hex');
 export const hashToken = token => createHash('sha256').update(token).digest('hex');
 export function cookies(req) {
@@ -36,8 +35,6 @@ export function authMiddleware(db,config) {
     let session = token ? db.prepare('SELECT * FROM sessions WHERE token_hash=? AND expires_at>?').get(hashToken(token),Date.now()) : null;
     // Anonymous visitors, including demo visitors, never receive a member
     // session automatically. Demo login is an explicit, isolated action.
-    const registration=readRegistrationSession(db,cookies(req).triage_registration);
-    if(registration) {req.registrationSession=registration.session;req.registrationIdentity=registration.identity;}
     if (session?.member_id) {
       const member=db.prepare('SELECT * FROM members WHERE id=?').get(session.member_id);
       if (member?.status==='active') {
@@ -56,7 +53,7 @@ export function csrfGuard(config) {
   return (req,res,next) => {
     if (['GET','HEAD','OPTIONS'].includes(req.method)) return next();
     if (req.headers.origin!==config.baseUrl) return res.status(403).json({error:'请求来源校验失败'});
-    const csrf=req.headers['x-csrf-token'],session=req.session || req.registrationSession;
+    const csrf=req.headers['x-csrf-token'],session=req.session;
     if (!session || typeof csrf!=='string' || !/^[a-f0-9]{64}$/.test(csrf) || csrf.length!==session.csrf.length || !timingSafeEqual(Buffer.from(csrf),Buffer.from(session.csrf))) return res.status(403).json({error:'会话校验失败，请刷新页面'});
     next();
   };

@@ -4,7 +4,7 @@ import { requestJson } from './integrations/http.js';
 import { identityId } from './integrations/github.js';
 
 const TTL=60000;
-const fallbackPolicy={registrationEnabled:true,publicOverviewEnabled:false,reapplyCooldownHours:24,maxPendingRequests:1000,version:1};
+const fallbackPolicy={publicOverviewEnabled:false,version:1};
 const stamp=()=>new Date().toISOString();
 export function publicItem(raw,repo) {
   if(!raw||!Number.isSafeInteger(raw.number)||raw.number<1||!['pr','issue'].includes(raw.kind)||!['open','closed'].includes(raw.state)) throw new Error('Invalid public item');

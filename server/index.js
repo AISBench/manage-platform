@@ -12,7 +12,6 @@ let stopping=false,tickPromise=null,workerPromise=null;
 function cleanup() {
   db.prepare('DELETE FROM sessions WHERE expires_at<?').run(Date.now());
   db.prepare('DELETE FROM oauth_states WHERE expires_at<?').run(Date.now());
-  db.prepare('DELETE FROM registration_sessions WHERE expires_at<?').run(Date.now());
   const events=new Date(Date.now()-config.eventRetentionDays*86400000).toISOString();
   const records=new Date(Date.now()-config.recordRetentionDays*86400000).toISOString();
   db.prepare("DELETE FROM webhook_inbox WHERE status='done' AND COALESCE(processed_at,received_at)<?").run(events);

@@ -34,13 +34,14 @@ test('versioned additive migration retains all original row data and reopens ide
   old.prepare('INSERT INTO items(id,number,data,workflow,owner,priority,due_at) VALUES (?,?,?,?,?,?,?)').run('legacy', 9, '{"title":"Legacy edit"}', 'blocked', 'alice', 'high', '2030-01-01');
   old.prepare('INSERT INTO settings(key,value) VALUES (?,?)').run('custom', JSON.stringify({ keep: true })); old.close();
   let db = openDatabase(filename);
-  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3]);
+  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4]);
+  assert.ok(db.prepare('PRAGMA table_info(members)').all().some(column => column.name === 'avatar_url'), 'schema v4 adds the member avatar column');
   const user = db.prepare('SELECT * FROM users').get(); assert.equal(user.name, 'Edited local name'); assert.equal(user.feishu_open_id, 'sensitive-open-id'); assert.equal(user.member_id, null);
   const item = db.prepare('SELECT * FROM items').get(); assert.equal(item.workflow, 'blocked'); assert.equal(item.data, '{"title":"Legacy edit"}'); assert.equal(item.priority, 'high'); assert.equal(item.due_at, '2030-01-01'); assert.equal(item.version, 1);
   assert.equal(getSetting(db, 'membershipInitialized', false), false); assert.deepEqual(getSetting(db, 'custom'), { keep: true });
   assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
   const before = snapshot(db); db.close(); db = openDatabase(filename);
-  assert.equal(snapshot(db), before); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 3);
+  assert.equal(snapshot(db), before); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 4);
   assert.throws(() => db.prepare("INSERT INTO users(id,login,member_id) VALUES ('2','bob','missing')").run());
   db.close();
 });

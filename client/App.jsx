@@ -7,7 +7,7 @@ import { IntegrationScreen, AuditScreen } from './Operations.jsx';
 import { isMine, pendingItem } from './ui.jsx';
 import PublicPortal from './Public.jsx';
 import RegistrationScreen from './Registration.jsx';
-import { JoinRequestsScreen, AccessPolicyScreen } from './AccessAdmin.jsx';
+import { AccessPolicyScreen } from './AccessAdmin.jsx';
 import { safeReturnTo } from './access.js';
 
 const WORKFLOWS = {
@@ -21,7 +21,6 @@ const NAV = [
   { key: 'tasks', label: '全部任务', icon: Inbox },
   { key: 'mine', label: '我的任务', icon: UserRound },
   { key: 'members', label: '团队成员', icon: Users, admin: true },
-  { key: 'join-requests', label: '加入申请', icon: Inbox, admin: true },
   { key: 'access-policy', label: '访问策略', icon: ShieldCheck, admin: true },
   { key: 'rules', label: '提醒规则', icon: SlidersHorizontal, admin: true },
   { key: 'notifications', label: '通知记录', icon: Bell },
@@ -100,7 +99,7 @@ export default function App() {
   // Mounting Workspace starts member API requests; never mount it on a public or restricted route.
   if (path === '/') return <PublicPortal session={session} onLogout={refreshSession} />;
   if (path === '/join' || path === '/join/status') return <RegistrationScreen session={session} onLogout={refreshSession} />;
-  if (path === '/workspace' || path === '/admin/join-requests' || path === '/admin/access-policy') {
+  if (path === '/workspace' || path === '/admin/access-policy') {
     if (session.mode !== 'member' || !session.user) return <RegistrationScreen session={session} onLogout={refreshSession} workspaceRequired />;
     if (path.startsWith('/admin/') && !session.user.isAdmin) return <div className="boot-screen"><Brand /><h2>此页面仅供管理员访问</h2><a className="btn btn-primary" href="/workspace">返回工作区</a><a className="text-button" href="/">公开概览</a></div>;
     return <Workspace session={session} setSession={setSession} onLogout={refreshSession} />;
@@ -110,7 +109,7 @@ export default function App() {
 function Brand() { return <div className="brand"><span className="brand-mark"><GitBranch size={24} strokeWidth={2.6} /></span><span><strong>AISBench</strong><small>协作工作台</small></span></div>; }
 
 function Workspace({ session, setSession, onLogout }) {
-  const [view, setView] = useState(() => window.location.pathname === '/admin/join-requests' ? 'join-requests' : window.location.pathname === '/admin/access-policy' ? 'access-policy' : 'dashboard');
+  const [view, setView] = useState(() => window.location.pathname === '/admin/access-policy' ? 'access-policy' : 'dashboard');
   const [taskFocus, setTaskFocus] = useState('');
   const [taskVisit, setTaskVisit] = useState(0);
   const [mobileMenu, setMobileMenu] = useState(false);
@@ -145,10 +144,10 @@ function Workspace({ session, setSession, onLogout }) {
     window.history.replaceState({}, '', `${window.location.pathname}${params.size ? `?${params}` : ''}${window.location.hash}`);
   }, [dashboard.data]);
   useEffect(() => {
-    const pop = () => { setView(window.location.pathname === '/admin/join-requests' ? 'join-requests' : window.location.pathname === '/admin/access-policy' ? 'access-policy' : 'dashboard'); setMobileMenu(false); };
+    const pop = () => { setView(window.location.pathname === '/admin/access-policy' ? 'access-policy' : 'dashboard'); setMobileMenu(false); };
     window.addEventListener('popstate', pop); return () => window.removeEventListener('popstate', pop);
   }, []);
-  const navigate = (next, focus = '') => { setView(next); setTaskFocus(focus); setTaskVisit(n => n + 1); setMobileMenu(false); window.history.pushState({}, '', ['join-requests', 'access-policy'].includes(next) ? `/admin/${next}` : '/workspace'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const navigate = (next, focus = '') => { setView(next); setTaskFocus(focus); setTaskVisit(n => n + 1); setMobileMenu(false); window.history.pushState({}, '', next === 'access-policy' ? '/admin/access-policy' : '/workspace'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const refresh = () => setRevision(n => n + 1);
   async function sync() {
     setSyncing(true); setSyncError(null);
@@ -165,7 +164,7 @@ function Workspace({ session, setSession, onLogout }) {
     {mobileMenu && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setMobileMenu(false)} />}
     <aside className={`sidebar ${mobileMenu ? 'is-open' : ''}`}><div className="sidebar-brand"><Brand /><button className="icon-button mobile-close" aria-label="关闭导航" onClick={() => setMobileMenu(false)}><X size={20} /></button></div>
       <div className="workspace-switch"><span className="repo-icon"><Github size={20} /></span><div><strong>AISBench</strong><small>{session.repo || 'AISBench/benchmark'}</small></div><span className="workspace-live" title="当前仓库" /></div>
-      <div className="nav-label">工作空间</div><nav className="main-nav" aria-label="主导航">{NAV.filter(n => !n.admin || user.isAdmin).map(({ key, label, icon: Icon }) => <button key={key} className={`nav-item ${view === key ? 'active' : ''}`} onClick={() => navigate(key)} aria-label={label} aria-current={view === key ? 'page' : undefined}><Icon size={19} /><span>{label}</span>{key === 'mine' && dashboard.data?.stats?.myTasks > 0 && <span className="nav-count">{dashboard.data.stats.myTasks}</span>}{key === 'join-requests' && dashboard.data?.stats?.pendingApplications > 0 && <span className="nav-count pending-nav-count">{dashboard.data.stats.pendingApplications}</span>}{view === key && <span className="nav-active-dot" />}</button>)}</nav>
+      <div className="nav-label">工作空间</div><nav className="main-nav" aria-label="主导航">{NAV.filter(n => !n.admin || user.isAdmin).map(({ key, label, icon: Icon }) => <button key={key} className={`nav-item ${view === key ? 'active' : ''}`} onClick={() => navigate(key)} aria-label={label} aria-current={view === key ? 'page' : undefined}><Icon size={19} /><span>{label}</span>{key === 'mine' && dashboard.data?.stats?.myTasks > 0 && <span className="nav-count">{dashboard.data.stats.myTasks}</span>}{view === key && <span className="nav-active-dot" />}</button>)}</nav>
       <div className="sidebar-bottom"><div className="sidebar-note"><span className="sidebar-note-icon"><Sparkles size={17} /></span><strong>代码之外，协作之内</strong><p>在这里管理本地工作流，<br />GitHub 状态始终保持独立。</p><a href={`https://github.com/${session.repo || 'AISBench/benchmark'}`} target="_blank" rel="noreferrer">前往 GitHub 仓库 <ArrowUpRight size={14} /></a></div><button className={`nav-item settings-nav ${view === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings2 size={19} /><span>个人设置与绑定</span></button><div className="user-profile"><Avatar login={user.login} src={user.avatarUrl} /><div><strong>{user.name || user.login}</strong><small><span className="tiny-dot" />{user.isAdmin ? '空间管理员' : '团队成员'}</small></div><button className="icon-button logout-button" title="退出登录" aria-label="退出登录" onClick={logout} disabled={loggingOut}>{loggingOut ? <LoaderCircle size={17} className="spin" /> : <LogOut size={17} />}</button></div></div>
     </aside>
     <div className="workspace-main"><header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileMenu(true)}><Menu size={21} /></button><span className="breadcrumb-root">工作空间</span><ChevronRight size={14} /><strong>{activeNav?.label || '个人设置与绑定'}</strong></div><div className="topbar-right"><a className="text-button workspace-public-link" href="/">公开门户<ArrowUpRight size={13} /></a>{session.demo && <Badge tone="amber"><span className="tiny-dot" />演示模式</Badge>}<span className="topbar-repo"><Github size={15} />{session.repo || 'AISBench/benchmark'}</span><span className="topbar-divider" /><button className="icon-button notification-button" title="通知记录" aria-label="查看通知记录" onClick={() => navigate('notifications')}><Bell size={20} /></button><Avatar login={user.login} src={user.avatarUrl} size="small" /></div></header>
@@ -174,8 +173,7 @@ function Workspace({ session, setSession, onLogout }) {
         {syncError && <div className="global-error"><ErrorBox compact error={syncError} retry={sync} /><button className="icon-button" aria-label="关闭错误提示" onClick={() => setSyncError(null)}><X size={17} /></button></div>}
         {view === 'dashboard' && <Dashboard resource={dashboard} user={user} session={session} onOpen={setSelectedItem} onNavigate={navigate} onSync={sync} syncing={syncing} />}
         {(view === 'tasks' || view === 'mine') && <TasksScreen key={`${view}:${taskVisit}`} mine={view === 'mine'} revision={revision} onOpen={setSelectedItem} onSync={sync} syncing={syncing} user={user} initialFocus={taskFocus} onChanged={refresh} notify={notify} />}
-        {view === 'members' && user.isAdmin && <MembersScreen revision={revision} demo={session.demo} notify={notify} onChanged={refresh} />}
-        {view === 'join-requests' && user.isAdmin && <JoinRequestsScreen revision={revision} notify={notify} onChanged={refresh} />}
+        {view === 'members' && user.isAdmin && <MembersScreen revision={revision} notify={notify} onChanged={refresh} />}
         {view === 'access-policy' && user.isAdmin && <AccessPolicyScreen revision={revision} notify={notify} onChanged={refresh} />}
         {view === 'integrations' && user.isAdmin && <IntegrationScreen revision={revision} />}
         {view === 'audit' && user.isAdmin && <AuditScreen revision={revision} />}
