@@ -30,7 +30,7 @@ export function openDatabase(filename) {
     try {
       db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 4)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 6)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -99,6 +99,93 @@ export function openDatabase(filename) {
         db.exec(`UPDATE members SET avatar_url=COALESCE((SELECT avatar_url FROM users WHERE users.member_id=members.id),'') WHERE avatar_url=''`);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(4, new Date().toISOString());
       }
+      if (!applied.has(5)) {
+        addColumn(db, 'members', 'conversation_baseline_at', 'TEXT');
+        db.exec(`CREATE TABLE IF NOT EXISTS item_messages (
+          id TEXT PRIMARY KEY,
+          item_id TEXT NOT NULL REFERENCES items(id),
+          source TEXT NOT NULL CHECK(source IN ('github','platform','demo')),
+          kind TEXT NOT NULL CHECK(kind IN ('issue_comment','review','review_comment','platform')),
+          github_comment_id TEXT UNIQUE,
+          github_review_id TEXT,
+          github_review_comment_id TEXT,
+          in_reply_to_id TEXT,
+          author_member_id TEXT REFERENCES members(id),
+          author_login TEXT NOT NULL,
+          author_github_id TEXT,
+          author_avatar_url TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL,
+          url TEXT,
+          path TEXT,
+          line INTEGER,
+          state TEXT,
+          delivery_status TEXT NOT NULL DEFAULT 'synced' CHECK(delivery_status IN ('pending','synced','failed','demo')),
+          delivery_error TEXT,
+          remote_deleted INTEGER NOT NULL DEFAULT 0,
+          client_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          synced_at TEXT NOT NULL,
+          UNIQUE(author_member_id, client_id));
+          CREATE INDEX IF NOT EXISTS item_messages_item_created ON item_messages(item_id, created_at DESC);
+          CREATE INDEX IF NOT EXISTS item_messages_author ON item_messages(author_member_id);
+          CREATE TABLE IF NOT EXISTS item_message_mentions (
+          message_id TEXT NOT NULL REFERENCES item_messages(id),
+          member_id TEXT NOT NULL REFERENCES members(id),
+          login TEXT NOT NULL,
+          PRIMARY KEY(message_id, member_id));
+          CREATE INDEX IF NOT EXISTS item_message_mentions_member ON item_message_mentions(member_id);
+          CREATE TABLE IF NOT EXISTS item_events (
+          id TEXT PRIMARY KEY,
+          item_id TEXT NOT NULL REFERENCES items(id),
+          category TEXT NOT NULL CHECK(category IN ('ci','operation')),
+          event_type TEXT NOT NULL,
+          dedupe_key TEXT UNIQUE NOT NULL,
+          actor_login TEXT,
+          actor_github_id TEXT,
+          actor_avatar_url TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL,
+          detail TEXT NOT NULL DEFAULT '{}',
+          occurred_at TEXT NOT NULL,
+          synced_at TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS item_events_item_category_time ON item_events(item_id, category, occurred_at DESC);
+          CREATE TABLE IF NOT EXISTS item_message_reads (
+          message_id TEXT NOT NULL REFERENCES item_messages(id),
+          member_id TEXT NOT NULL REFERENCES members(id),
+          read_at TEXT NOT NULL,
+          PRIMARY KEY(message_id, member_id));
+          CREATE INDEX IF NOT EXISTS item_message_reads_member ON item_message_reads(member_id);
+          CREATE TABLE IF NOT EXISTS item_read_state (
+          item_id TEXT NOT NULL REFERENCES items(id),
+          member_id TEXT NOT NULL REFERENCES members(id),
+          last_read_at TEXT NOT NULL,
+          last_read_message_id TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(item_id, member_id));
+          CREATE TABLE IF NOT EXISTS item_conversation_sync (
+          item_id TEXT PRIMARY KEY REFERENCES items(id),
+          messages_synced_at TEXT,
+          events_synced_at TEXT,
+          ci_synced_at TEXT,
+          truncated INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE IF NOT EXISTS github_user_tokens (
+          member_id TEXT PRIMARY KEY REFERENCES members(id),
+          github_login TEXT NOT NULL,
+          github_user_id TEXT NOT NULL,
+          encrypted_token TEXT NOT NULL,
+          token_iv TEXT NOT NULL,
+          token_tag TEXT NOT NULL,
+          scopes TEXT NOT NULL DEFAULT '',
+          authorized_at TEXT NOT NULL,
+          last_verified_at TEXT);`);
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(5, new Date().toISOString());
+      }
+      if (!applied.has(6)) {
+        addColumn(db, 'item_messages', 'diff_hunk', 'TEXT');
+        addColumn(db, 'item_messages', 'start_line', 'INTEGER');
+        addColumn(db, 'item_messages', 'side', 'TEXT');
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(6, new Date().toISOString());
+      }
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));
       db.exec('COMMIT');
@@ -166,6 +253,11 @@ export function listItems(db, now = Date.now(), appId = '') {
 
 export function seedDemo(db, repo) {
   const ago = hours => new Date(Date.now() - hours * 3600000).toISOString();
+  const mentionLoginsForSeed = body => {
+    const logins = new Set();
+    for (const match of String(body).matchAll(/(^|[^\w-])@([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)/gi)) logins.add(match[2].toLowerCase());
+    return [...logins];
+  };
   const fixtures = [
     ['demo-admin', '1001', 'demo-maintainer', '演示维护者', 'admin', 'active'],
     ['demo-reviewer', '1002', 'reviewer-chen', '陈同学', 'member', 'active'],
@@ -214,6 +306,42 @@ export function seedDemo(db, repo) {
           .run(JSON.stringify(data), ownerId, existing.owner && !existing.owner_member_id && !ownerId ? 1 : 0, existing.id);
       }
     });
+    const demoMessages = [
+      ['demo-msg-9000-1', 'github:9000', 'github', 'issue_comment', 'demo-reviewer', 'reviewer-chen', '1002', '这个 PR 的流式性能数据我看过了，整体稳定。@demo-maintainer 需要再确认一下长序列场景。', 'synced', ago(30)],
+      ['demo-msg-9000-2', 'github:9000', 'github', 'review_comment', null, 'contributor-li', '2001', '这里建议补充一下异常中断时的 token 统计。', 'synced', ago(20)],
+      ['demo-msg-9000-3', 'github:9000', 'platform', 'platform', 'demo-admin', 'demo-maintainer', '1001', '收到，我在平台上跟进一下长序列场景，稍后把结论同步到 GitHub。', 'demo', ago(6)],
+      ['demo-msg-9000-4', 'github:9000', 'github', 'issue_comment', 'demo-reviewer', 'reviewer-chen', '1002', '补充一份很长的测试记录，用于验证折叠效果。' + '这是较长的演示评论内容，用于展示折叠与展开。'.repeat(60), 'synced', ago(1)],
+      ['demo-msg-9001-1', 'github:9001', 'github', 'issue_comment', 'demo-reviewer', 'reviewer-chen', '1002', '这个问题在最近一次同步中也出现了，@demo-maintainer 方便看一下数据集配置吗？', 'synced', ago(18)],
+      ['demo-msg-9001-2', 'github:9001', 'github', 'issue_comment', null, 'contributor-zhou', '2002', '我这边也复现了，附上最小复现步骤和日志。', 'synced', ago(8)],
+    ];
+    for (const [id, itemId, source, kind, authorMember, login, githubId, body, delivery, at] of demoMessages) {
+      db.prepare(`INSERT OR IGNORE INTO item_messages(id,item_id,source,kind,author_member_id,author_login,author_github_id,author_avatar_url,body,delivery_status,created_at,updated_at,synced_at)
+        VALUES (?,?,?,?,?,?,?,'',?,?,?,?,?)`).run(id, itemId, source, kind, authorMember, login, githubId, body, delivery, at, at, at);
+      for (const login of mentionLoginsForSeed(body)) {
+        const member = fixtures.find(fixture => fixture[2] === login)?.[0];
+        if (member) db.prepare('INSERT OR IGNORE INTO item_message_mentions(message_id,member_id,login) VALUES (?,?,?)').run(id, member, login);
+      }
+    }
+    db.prepare(`UPDATE item_messages SET path=?,line=?,side=?,diff_hunk=?,github_comment_id=?,url=? WHERE id='demo-msg-9000-2'`)
+      .run('src/benchmark/tasks.py', 42, 'RIGHT',
+        '@@ -39,7 +39,9 @@ def run_task(task):\n     result = task.execute()\n-    return result\n+    if result is None:\n+        raise ValueError("empty result")\n+    return result\n \n def cleanup():',
+        'review_comment:90002', `https://github.com/${repo}/pull/9000#discussion_r90002`);
+    const demoEvents = [
+      ['demo-event-ci-1', 'github:9000', 'ci', 'check_run', 'check:demo-9000', 'github-actions', '性能回归 / benchmark', JSON.stringify({ name: '性能回归 / benchmark', app: 'GitHub Actions', appSlug: 'github-actions', runId: 9000001, status: 'completed', conclusion: 'success', url: `https://github.com/${repo}/actions`, completedAt: ago(3) }), ago(3)],
+      ['demo-event-ci-2', 'github:9000', 'ci', 'check_run', 'check:demo-9000-lint', 'github-actions', '代码风格检查', JSON.stringify({ name: '代码风格检查', app: 'GitHub Actions', appSlug: 'github-actions', runId: 9000002, status: 'completed', conclusion: 'failure', url: `https://github.com/${repo}/actions`, completedAt: ago(2) }), ago(2)],
+      ['demo-event-op-1', 'github:9000', 'operation', 'labeled', 'timeline:9000:labeled:demo', 'demo-reviewer', '添加标签 enhancement', JSON.stringify({ label: 'enhancement' }), ago(26)],
+      ['demo-event-op-2', 'github:9000', 'operation', 'review_requested', 'timeline:9000:review:demo', 'demo-maintainer', '请求 @reviewer-chen 评审', JSON.stringify({ reviewer: 'reviewer-chen' }), ago(24)],
+      ['demo-event-op-3', 'github:9001', 'operation', 'assigned', 'timeline:9001:assigned:demo', 'demo-maintainer', '指派给 @demo-maintainer', JSON.stringify({ assignee: 'demo-maintainer' }), ago(16)],
+    ];
+    for (const [id, itemId, category, eventType, dedupeKey, actor, summary, detail, at] of demoEvents) {
+      db.prepare(`INSERT OR IGNORE INTO item_events(id,item_id,category,event_type,dedupe_key,actor_login,actor_github_id,actor_avatar_url,summary,detail,occurred_at,synced_at)
+        VALUES (?,?,?,?,?,?,NULL,'',?,?,?,?)`).run(id, itemId, category, eventType, dedupeKey, actor, summary, detail, at, at);
+    }
+    db.prepare("UPDATE item_events SET detail=json_set(detail,'$.appSlug','github-actions','$.runId',9000001) WHERE id='demo-event-ci-1'").run();
+    db.prepare("UPDATE item_events SET detail=json_set(detail,'$.appSlug','github-actions','$.runId',9000002) WHERE id='demo-event-ci-2'").run();
+    db.prepare("INSERT OR IGNORE INTO item_message_reads(message_id,member_id,read_at) VALUES ('demo-msg-9000-1','demo-admin',?)").run(ago(12));
+    db.prepare("INSERT OR IGNORE INTO item_read_state(item_id,member_id,last_read_at,last_read_message_id,updated_at) VALUES ('github:9000','demo-admin',?,'demo-msg-9000-1',?)").run(ago(12), ago(12));
+    db.prepare('UPDATE members SET conversation_baseline_at=COALESCE(conversation_baseline_at,?) WHERE id IN (?,?)').run(ago(72), 'demo-admin', 'demo-reviewer');
     setSetting(db, 'demoFixtureVersion', 2);
     if (db.prepare("SELECT 1 FROM members WHERE id='demo-admin' AND github_user_id='1001'").get()) setSetting(db, 'membershipInitialized', true);
     if (inserted) addActivity(db, '演示工作区已就绪', '所有数据与真实仓库隔离，不会发送飞书消息或修改 GitHub。');

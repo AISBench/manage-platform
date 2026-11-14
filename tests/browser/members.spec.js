@@ -17,28 +17,32 @@ test('administrator edits, disables and enables an auto-provisioned member',asyn
   await page.getByRole('dialog').getByRole('button',{name:'确认停用',exact:true}).click();expect((await rejected).status()).toBe(409);
   await expect(page.getByRole('dialog').getByRole('alert')).toBeVisible();await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
   await nav(page,'操作审计');await expect(page.getByRole('heading',{name:'操作审计',exact:true})).toBeVisible();await page.getByLabel('审计操作类型').fill('member.update');await expect(page.getByRole('cell',{name:'member.update',exact:true}).first()).toBeVisible();
-  await nav(page,'运行状态');await expect(page.getByRole('heading',{name:'运行状态',exact:true})).toBeVisible();await expect(page.getByText('Schema v4',{exact:true})).toBeVisible();
+  await nav(page,'运行状态');await expect(page.getByRole('heading',{name:'运行状态',exact:true})).toBeVisible();await expect(page.getByText('Schema v6',{exact:true})).toBeVisible();
 });
 
-test('versioned bulk assignment and stale drawer conflict reload are functional',async({page})=>{
+test('versioned bulk assignment and stale detail conflict are functional',async({page})=>{
   await page.goto('/workspace');await nav(page,'全部任务');
   await page.getByLabel('选择任务 #9000',{exact:true}).check();await page.getByLabel('选择任务 #9002',{exact:true}).check();
   await page.getByRole('button',{name:'批量分派',exact:true}).click();let dialog=page.getByRole('dialog',{name:'批量分派 2 项任务'});
   await dialog.getByRole('combobox').selectOption('demo-pending');const bulk=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/api/items/bulk-assign'));
   await dialog.getByRole('button',{name:'确认整批分派',exact:true}).click();expect((await bulk).status()).toBe(200);
-  await page.getByRole('button',{name:'支持服务化模型的流式性能评测',exact:true}).click();dialog=page.getByRole('dialog');await expect(dialog.getByLabel('平台负责人',{exact:true})).toHaveValue('demo-pending');
+  await page.getByRole('button',{name:'支持服务化模型的流式性能评测',exact:true}).click();
+  await page.waitForURL('**/workspace/items/github%3A9000');
+  await expect(page.getByRole('heading',{name:'支持服务化模型的流式性能评测',exact:true})).toBeVisible();
+  const workflow=page.locator('.item-workflow');
+  await expect(workflow.getByLabel('平台负责人',{exact:true})).toHaveValue('demo-pending');
   const other=await page.evaluate(async()=>{
     const session=await (await fetch('/api/session')).json();const all=await (await fetch('/api/items?state=all')).json();const item=all.items.find(i=>i.id==='github:9000');
     return (await fetch('/api/items/github:9000',{method:'PATCH',headers:{'Content-Type':'application/json','X-CSRF-Token':session.csrfToken},body:JSON.stringify({version:item.version,priority:item.priority==='low'?'high':'low'})})).status;
   });expect(other).toBe(200);
-  await dialog.getByRole('combobox').first().selectOption('done');const stale=page.waitForResponse(r=>r.request().method()==='PATCH'&&r.url().includes('/api/items/'));
-  await dialog.getByRole('button',{name:'保存本地工作流',exact:true}).click();expect((await stale).status()).toBe(409);await expect(dialog.getByText('数据已变化或操作存在冲突',{exact:true})).toBeVisible();
-  await dialog.getByRole('button',{name:'刷新数据',exact:true}).click();await expect(dialog.getByRole('alert')).toHaveCount(0);await dialog.getByRole('button',{name:'关闭任务详情'}).click();
+  await workflow.getByRole('combobox').first().selectOption('done');const stale=page.waitForResponse(r=>r.request().method()==='PATCH'&&r.url().includes('/api/items/'));
+  await workflow.getByRole('button',{name:'保存本地工作流',exact:true}).click();expect((await stale).status()).toBe(409);await expect(page.getByRole('alert')).toContainText('事务已更新');
+  await page.reload();await expect(page.locator('.item-workflow').getByLabel('平台负责人',{exact:true})).toHaveValue('demo-pending');
 });
 
-test('notification platform link opens the referenced transaction',async({page})=>{
+test('notification platform link opens the referenced transaction detail',async({page})=>{
   await page.goto('/workspace?item=github%3A9001');
-  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.waitForURL('**/workspace/items/github%3A9001');
   await expect(page.getByRole('heading',{name:'多轮对话数据集评测结果异常',exact:true})).toBeVisible();
 });
 

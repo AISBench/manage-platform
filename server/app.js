@@ -13,6 +13,8 @@ import { exchangeFeishuCode, feishuAuthorizeUrl, sendFeishuMessage } from './int
 import { requestJson } from './integrations/http.js';
 import { autoProvisionMemberInTransaction, githubAvatar, getMemberView, listMemberViews, updateMember, setMemberStatus } from './members.js';
 import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
+import { saveGitHubToken, deleteGitHubToken } from './github-tokens.js';
+import { listConversation, syncItemConversation, postPlatformMessage, retryPlatformMessage, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto } from './conversation.js';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const version=z.number().int().positive(), id=z.string().min(1).max(100), short=z.string().trim().max(120);
@@ -34,6 +36,10 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   const services=createServices(db,config,{...integrations,fetchImpl});
   const app=express();app.disable('x-powered-by');app.set('trust proxy',config.trustProxy || false);
   const allItems=()=>listItems(db,Date.now(),config.feishuAppId || '');
+  function withUnread(items,memberId) {
+    const unread=unreadSummary(db,memberId);
+    return items.map(item=>({...item,unreadCount:unread[item.id]?.unread || 0,mentionCount:unread[item.id]?.mentions || 0,lastMessageAt:unread[item.id]?.lastMessageAt || null}));
+  }
   const memberView=memberId=>getMemberView(db,memberId,{appId:config.feishuAppId || ''});
   function clearBrowserSessions(req,res) {
     const jar=cookies(req);
@@ -44,13 +50,17 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(typeof value!=='string'||value.length>1000||value.includes('\\')||/[\r\n]/.test(value)) return '/workspace';
     try {const url=new URL(value,config.baseUrl);return url.origin===config.baseUrl&&url.pathname==='/workspace'?url.pathname+url.search+url.hash:'/workspace';} catch {return '/workspace';}
   }
-  function signInMember(profile,req,res) {
+  function signInMember(profile,req,res,{accessToken='',scopes=''}={}) {
     const githubId=identityId(profile.githubId ?? profile.id);
     const userId=transact(()=>{
       // GitHub login links or creates the member account automatically; no
       // application or administrator approval is involved.
       const member=autoProvisionMemberInTransaction(db,{profile:{...profile,githubId},requestId:req.requestId});
       const avatar=config.demo ? (profile.avatarUrl || '') : githubAvatar({...profile,githubId});
+      if(accessToken&&!config.demo) {
+        const stored=saveGitHubToken(db,{memberId:member.id,login:profile.login,githubUserId:githubId,token:accessToken,scopes:scopes || config.githubOAuthScope},config);
+        if(stored) addAudit(db,{actorId:member.id,action:'github.write_authorized',targetType:'member',targetId:member.id,after:{scopes:scopes || config.githubOAuthScope},requestId:req.requestId});
+      }
       const existing=db.prepare('SELECT id FROM users WHERE member_id=?').get(member.id),uid=existing?.id || githubId;
       db.prepare('UPDATE users SET login=? WHERE login=? COLLATE NOCASE AND id<>?').run(`archived-${randomUUID()}`,profile.login,uid);
       db.prepare('INSERT INTO users(id,member_id,login,name,avatar_url) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET member_id=excluded.member_id,login=excluded.login,name=excluded.name,avatar_url=excluded.avatar_url').run(uid,member.id,profile.login,profile.name || profile.login,avatar);
@@ -104,7 +114,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     return updated;
   }
   app.use((req,res,next)=>{req.requestId=randomUUID();res.set('X-Request-ID',req.requestId);next();});
-  app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'",'https://avatars.githubusercontent.com','data:'],connectSrc:["'self'"],upgradeInsecureRequests:config.secure?[]:null}},strictTransportSecurity:config.secure?undefined:false}));
+  app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptSrc:["'self'"],styleSrc:["'self'","'unsafe-inline'"],imgSrc:["'self'",'https:','https://avatars.githubusercontent.com','https://github.com','https://*.githubusercontent.com','https://github.githubassets.com','https://img.shields.io','https://*.shields.io','https://github-production-user-asset-6210df.s3.amazonaws.com','data:'],connectSrc:["'self'"],upgradeInsecureRequests:config.secure?[]:null}},strictTransportSecurity:config.secure?undefined:false}));
   app.get('/api/health',(_req,res)=>res.json({ok:true}));
   app.post('/api/webhooks/github',rateLimit({windowMs:60000,limit:120}),express.raw({type:'application/json',limit:'2mb'}),(req,res)=>{
     if(config.demo) throw fail(400,'演示模式不接收外部事件');
@@ -123,7 +133,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
     const policy=getAccessPolicy(db);
-    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled}});
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
@@ -144,7 +154,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(config.demo) return res.redirect('/');
     const context=JSON.stringify({returnTo:safeReturnTo(req.query.returnTo)});
     const state=newOAuthState(db,res,'github',null,config,context),url=new URL('https://github.com/login/oauth/authorize');
-    url.search=new URLSearchParams({client_id:config.githubClientId,redirect_uri:`${config.baseUrl}/auth/github/callback`,state,scope:'read:user'}).toString();res.redirect(url.toString());
+    url.search=new URLSearchParams({client_id:config.githubClientId,redirect_uri:`${config.baseUrl}/auth/github/callback`,state,scope:config.githubOAuthScope}).toString();res.redirect(url.toString());
   });
   app.get('/auth/github/callback',async(req,res)=>{
     const oauth=consumeOAuthState(db,req,res,'github',config);
@@ -156,7 +166,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const githubId=identityId(profile.id);if(!githubId||typeof profile.login!=='string'||profile.type!=='User') throw fail(502,'无效 GitHub 个人身份');
     const member=db.prepare('SELECT status FROM members WHERE github_user_id=?').get(githubId);
     if(member?.status==='disabled') throw fail(403,'该成员已停用，请联系管理员');
-    signInMember(profile,req,res);
+    signInMember(profile,req,res,{accessToken:token.access_token,scopes:typeof token.scope==='string'?token.scope:''});
     const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);url.searchParams.set('auth','success');
     res.redirect(url.pathname+url.search+url.hash);
   });
@@ -193,9 +203,11 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   });
   app.use('/api',requireUser,csrfGuard(config),rateLimit({windowMs:60000,limit:240}));
   app.get('/api/dashboard',(req,res)=>{
-    const items=allItems(),open=items.filter(i=>i.state==='open');
-    res.json({stats:{openIssues:open.filter(i=>i.kind==='issue').length,openPRs:open.filter(i=>i.kind==='pr').length,overdue:open.filter(i=>i.overdue).length,myTasks:open.filter(i=>i.workflow!=='done'&&isParticipant(i,req.user)).length,unassigned:open.filter(i=>!i.ownerMemberId).length,ownerIssues:open.filter(i=>i.ownerIssue).length,needsReview:open.filter(i=>i.needsReview).length},items,activity:db.prepare('SELECT id,title,detail,created_at AS createdAt FROM activity ORDER BY created_at DESC LIMIT 20').all(),lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError')});
+    const items=withUnread(allItems(),req.member.id),open=items.filter(i=>i.state==='open');
+    const unreadTotal=items.reduce((sum,item)=>sum+item.unreadCount,0),mentionTotal=items.reduce((sum,item)=>sum+item.mentionCount,0);
+    res.json({stats:{openIssues:open.filter(i=>i.kind==='issue').length,openPRs:open.filter(i=>i.kind==='pr').length,overdue:open.filter(i=>i.overdue).length,myTasks:open.filter(i=>i.workflow!=='done'&&isParticipant(i,req.user)).length,unassigned:open.filter(i=>!i.ownerMemberId).length,ownerIssues:open.filter(i=>i.ownerIssue).length,needsReview:open.filter(i=>i.needsReview).length,unreadMessages:unreadTotal,mentions:mentionTotal},items,activity:db.prepare('SELECT id,title,detail,created_at AS createdAt FROM activity ORDER BY created_at DESC LIMIT 20').all(),lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError')});
   });
+  app.get('/api/items/unread',(req,res)=>{z.object({}).strict().parse(req.query);const summary=unreadSummary(db,req.member.id);res.json({items:summary,total:Object.values(summary).reduce((sum,item)=>sum+item.unread,0),mentions:Object.values(summary).reduce((sum,item)=>sum+item.mentions,0)});});
   app.get('/api/items',(req,res)=>{
     let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module}=req.query;
     if(kind) items=items.filter(i=>i.kind===kind);
@@ -207,7 +219,56 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(needsReview==='true') items=items.filter(i=>i.needsReview);
     if(module) items=items.filter(i=>i.module===module);
     if(typeof q==='string') {const search=q.slice(0,200).toLowerCase();items=items.filter(i=>`${i.title} ${i.number} ${i.author} ${(i.labels||[]).join(' ')}`.toLowerCase().includes(search));}
+    res.json({items:withUnread(items,req.member.id)});
+  });
+  app.get('/api/items/search',(req,res)=>{
+    const query=z.object({q:z.string().max(100).default('')}).strict().parse(req.query);
+    const needle=query.q.trim().toLowerCase();
+    const items=allItems().filter(item=>!needle||`${item.number} ${item.title}`.toLowerCase().includes(needle)).slice(0,8)
+      .map(item=>({id:item.id,number:item.number,kind:item.kind,title:item.title,state:item.state}));
     res.json({items});
+  });
+  app.get('/api/items/:id/conversation',async(req,res)=>{
+    const query=z.object({before:z.string().max(50).optional(),limit:z.coerce.number().int().min(1).max(100).default(50),refresh:z.enum(['0','1']).default('0')}).strict().parse(req.query);
+    let syncError=null;
+    if(query.refresh==='1') {
+      try { await syncItemConversation(db,config,req.params.id,{fetchImpl}); }
+      catch(error) { if(error.status===404) throw error; syncError=error.code || error.message; }
+    }
+    res.json({...listConversation(db,config,req.params.id,req.member.id,{before:query.before || '',limit:query.limit}),syncError});
+  });
+  app.post('/api/items/:id/conversation/sync',rateLimit({windowMs:60000,limit:6,keyGenerator:req=>`conversation-sync:${req.member.id}`}),async(req,res)=>{
+    z.object({}).strict().parse(req.body);fresh(req);
+    const result=await syncItemConversation(db,config,req.params.id,{force:true,fetchImpl});
+    res.json({...result,conversation:listConversation(db,config,req.params.id,req.member.id)});
+  });
+  app.post('/api/items/:id/messages',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`comment:${req.member.id}`}),async(req,res)=>{
+    fresh(req);const body=z.object({body:z.string().trim().min(1).max(20000),clientId:z.string().max(64).optional()}).strict().parse(req.body);
+    const row=await postPlatformMessage(db,config,{member:req.member,itemId:req.params.id,body:body.body,clientId:body.clientId,fetchImpl});
+    res.status(201).json({message:messageDto(db,row,req.member.id)});
+  });
+  app.post('/api/items/:id/messages/:messageId/retry',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`comment-retry:${req.member.id}`}),async(req,res)=>{
+    fresh(req);z.object({}).strict().parse(req.body);
+    const row=await retryPlatformMessage(db,config,{member:req.member,itemId:req.params.id,messageId:req.params.messageId,fetchImpl});
+    res.json({message:messageDto(db,row,req.member.id)});
+  });
+  app.post('/api/items/:id/ci/:eventId/rerun',rateLimit({windowMs:60000,limit:6,keyGenerator:req=>`ci-rerun:${req.member.id}`}),async(req,res)=>{
+    fresh(req);z.object({}).strict().parse(req.body);
+    res.json(await rerunItemCI(db,config,{member:req.member,itemId:req.params.id,eventId:req.params.eventId,fetchImpl}));
+  });
+  app.post('/api/items/:id/read',(req,res)=>{
+    fresh(req);const body=z.object({messageIds:z.array(z.string().min(1).max(100)).min(1).max(50)}).strict().parse(req.body);
+    res.json({marked:recordReads(db,req.member.id,req.params.id,body.messageIds)});
+  });
+  app.get('/api/items/:id/messages/:messageId/reads',(req,res)=>{
+    z.object({}).strict().parse(req.query);
+    res.json({members:readsForMessage(db,req.params.id,req.params.messageId)});
+  });
+  app.post('/api/github/authorization/revoke',(req,res)=>{
+    fresh(req);z.object({}).strict().parse(req.body);
+    const removed=deleteGitHubToken(db,req.member.id);
+    addAudit(db,{actorId:req.member.id,action:'github.write_revoked',targetType:'member',targetId:req.member.id,after:{removed:removed>0},requestId:req.requestId});
+    res.json({ok:true,removed:removed>0});
   });
   app.post('/api/items/bulk-assign',requireAdmin,(req,res)=>{
     const body=z.object({items:z.array(z.object({id,version}).strict()).min(1).max(100),ownerMemberId:z.union([id,z.null()])}).strict().parse(req.body);

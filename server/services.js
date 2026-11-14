@@ -3,6 +3,7 @@ import { listItems, getSetting, setSetting, addActivity, addAudit } from './db.j
 import { fetchRepositoryItems, identityId } from './integrations/github.js';
 import { sendFeishuMessage } from './integrations/feishu.js';
 import { createPublicService } from './public-service.js';
+import { syncConversationBatch, upsertFromWebhook } from './conversation.js';
 
 export function isQuietTime(start,end,now=new Date()) {
   if (!start || !end || start===end) return false;
@@ -137,8 +138,15 @@ export function createServices(db,config,integrations={}) {
   async function onWebhook(payload,delivery,event,{alreadySynced=false}={}) {
     if(payload.repository?.full_name?.toLowerCase()!==config.repo.toLowerCase()) return;
     if(db.prepare('SELECT id FROM webhook_deliveries WHERE id=?').get(delivery)) return;
-    if(!alreadySynced) {if(syncPromise) await syncPromise;await sync();}
-    const item=items().find(i=>i.number===(payload.issue?.number||payload.pull_request?.number));
+    const number=payload.issue?.number||payload.pull_request?.number;
+    // Conversation writes are the real-time path; only fall back to a full
+    // repository sync when the item is not present locally yet.
+    if(number&&!db.prepare('SELECT id FROM items WHERE number=?').get(number)) {
+      if(syncPromise) await syncPromise;
+      await sync();
+    }
+    const item=items().find(i=>i.number===(payload.issue?.number||payload.pull_request?.number||payload.check_run?.pull_requests?.[0]?.number));
+    if(item) upsertFromWebhook(db,payload,event,delivery);
     const events=new Set(['issues','issue_comment','pull_request','pull_request_review','pull_request_review_comment']);
     const actions=['opened','assigned','review_requested','submitted','created','reopened','ready_for_review','synchronize'];
     db.exec('BEGIN IMMEDIATE');
@@ -162,11 +170,8 @@ export function createServices(db,config,integrations={}) {
     if(!webhookPromise) webhookPromise=(async()=>{
       const jobs=db.prepare("SELECT * FROM webhook_inbox WHERE status='pending' AND next_at<=? ORDER BY received_at LIMIT 50").all(Date.now());
       if(!jobs.length) return;
-      let syncError=null;
-      try {if(syncPromise) await syncPromise;await sync();} catch(error) {syncError=error;}
       for(const job of jobs) {
         try {
-          if(syncError) throw syncError;
           await onWebhook(JSON.parse(job.payload),job.id,job.event,{alreadySynced:true});
           db.prepare("UPDATE webhook_inbox SET status='done',processed_at=? WHERE id=?").run(nowISO(),job.id);
         } catch {
@@ -178,6 +183,7 @@ export function createServices(db,config,integrations={}) {
     })().finally(()=>{webhookPromise=null;});
     return webhookPromise;
   }
+  async function syncConversations(options={}) {return syncConversationBatch(db,config,{...options,fetchImpl:options.fetchImpl || integrations.fetchImpl || fetch});}
   async function drain() {await Promise.allSettled([syncPromise,reminderPromise,webhookPromise,publicPortal.drain()].filter(Boolean));}
-  return {sync,runReminders,onWebhook,acceptWebhook,processWebhooks,queueAssignment,publicPortal,drain};
+  return {sync,runReminders,onWebhook,acceptWebhook,processWebhooks,queueAssignment,syncConversations,publicPortal,drain};
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { addAudit, getSetting, setSetting } from './db.js';
+import { deleteGitHubToken } from './github-tokens.js';
 
 class MemberError extends Error {
   constructor(status, message, code) { super(message); this.status = status; this.statusCode = status; this.code = code; }
@@ -45,6 +46,7 @@ function auditMember(row) { return { id: row.id, githubId: row.github_user_id, l
 function revokeMemberAccess(db, id) {
   db.prepare('DELETE FROM sessions WHERE member_id=? OR user_id IN (SELECT id FROM users WHERE member_id=?)').run(id, id);
   db.prepare('DELETE FROM oauth_states WHERE member_id=? OR user_id IN (SELECT id FROM users WHERE member_id=?)').run(id, id);
+  deleteGitHubToken(db, id);
   db.prepare("UPDATE notifications SET status='cancelled',error_code='member_disabled',error=NULL WHERE recipient_member_id=? AND status IN ('pending','sending')").run(id);
   db.prepare("UPDATE feishu_bindings SET status='needs_confirmation',verified_at=NULL,binding_version=binding_version+1 WHERE member_id=?").run(id);
 }

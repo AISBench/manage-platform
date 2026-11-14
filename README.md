@@ -2,7 +2,7 @@
 
 面向 [AISBench/benchmark](https://github.com/AISBench/benchmark) 的 PR / Issue 团队管理平台：**游客公开概览 → GitHub 登录自动创建/关联成员账号 → 进入成员工作区 → 本人绑定飞书与事务闭环**。
 
-> 单团队、单仓库、单实例。首次 GitHub 登录即自动成为普通成员，无需申请或审核；平台头像与昵称直接复用 GitHub 资料。不保存账号密码。GitHub 集成只读，负责人、进度、优先级、截止时间属于平台内部字段，不向游客公开，也不会自动合并 PR、关闭 Issue 或发表评论。
+> 单团队、单仓库、单实例。首次 GitHub 登录即自动成为普通成员，无需申请或审核；平台头像与昵称直接复用 GitHub 资料。不保存账号密码。GitHub 的 Issue/PR 状态只读，平台仅允许以成员本人身份**新增 Issue 评论**，不会合并 PR、关闭 Issue 或修改标签。负责人、进度、优先级、截止时间属于平台内部字段，不向游客公开。
 
 ![游客公开概览演示](docs/preview-public.png)
 
@@ -44,6 +44,13 @@ npm run demo
 - 仓库工作台、关键词 / 类型 / GitHub 状态 / 工作流 / 负责人 / 模块筛选。
 - 基于固定 GitHub 用户 ID 的准入与个人待办，用户名改名不丢权限，旧用户名被别人占用不会继承权限。
 - 首次 GitHub 登录自动创建成员；管理员可编辑姓名、模块、备注、角色，并按状态筛选与分页。
+- Issue/PR 全屏会话中心：最新消息在前、长消息折叠、三位一体的对话 / CI / 操作记录 / 其他信息分栏。
+- 详情页顶部展示 GitHub 原始描述（Markdown 渲染、图片与表格、长描述默认折叠），并附 GitHub 原文链接。
+- 平台发言以成员本人 GitHub 身份写回 Issue/PR；支持逐条已读回执、未读数、@我 高亮与任务列表角标。
+- 评论区编辑器对齐 GitHub 常用能力：Markdown 工具栏、写/预览切换、`@` 成员补全、`#` 事务引用、快捷键与本地草稿自动保存；图片仅支持可公开访问的外链，GitHub 未提供评论附件的公开上传 API。
+- PR 行内评论直接展示对应文件与 diff 代码片段，并高亮被评论的行，附“在 Files changed 中定位”按钮跳转 GitHub PR 的 Files changed 具体位置。
+- CI 栏对 GitHub Actions 检查提供“全量重试”，以成员本人 GitHub 授权重新运行该工作流全部任务；非 Actions 检查不提供该操作。若组织启用了 OAuth App 访问限制，可配置仅含 Actions 写权限的服务器 Token `GITHUB_ACTIONS_TOKEN` 作为兜底，此时 GitHub 上显示为 Token 所有者触发。
+- 本地工作流展示 GitHub Assignee 到平台成员的映射（未认证用户标灰不可分派），并根据 GitHub 标签给出工作流/优先级建议，一键采用后只写平台字段，不修改 GitHub 标签。
 - 成员首次登录激活；停用会撤销会话、OAuth 待办、待发通知，并使飞书关联重新待确认；不删除历史分派。
 - 最后一名已激活正常管理员保护、成员资料与事务的版本冲突校验。
 - 分派给尚未登录的成员、管理员批量原子分派、普通成员显式认领未分派事务（不可抢占）。
@@ -96,7 +103,7 @@ npm start
 
 ### 3. GitHub 应用与仓库读取
 
-创建 GitHub OAuth App：Homepage 为 `BASE_URL`，回调为 `BASE_URL/auth/github/callback`。登录只申请 `read:user`，身份 Token 不保存、不作为仓库操作凭证。
+创建 GitHub OAuth App：Homepage 为 `BASE_URL`，回调为 `BASE_URL/auth/github/callback`。登录默认申请 `read:user public_repo`（私有仓库改为 `repo`），用于读取身份、以成员本人身份新增 Issue 评论，以及重试 GitHub Actions 工作流。OAuth 访问 Token 使用 `TOKEN_ENCRYPTION_KEY`（AES-256-GCM）加密保存；未配置密钥时仍可登录和查看会话，但不能在平台发言或触发 CI 重试。评论与重试永远不用于仓库代码写入。
 
 仓库读取使用服务器独立凭证。公开仓库可匿名读取，但完整 PR / CI 同步容易耗尽匿名配额；应按目标仓库和组织策略配置适用的只读 PAT 或后续 GitHub App 方案。只申请读取 Metadata / Issues / Pull requests / Checks / Commit statuses 所需权限，不给平台自动写入权限。
 
@@ -109,9 +116,10 @@ npm start
 - Payload URL：`BASE_URL/api/webhooks/github`
 - Content type：`application/json`
 - Secret：与服务器 `GITHUB_WEBHOOK_SECRET` 相同的长随机值。
-- 订阅 Issues、Issue comments、Pull requests、Pull request reviews、Pull request review comments。
+- 订阅 Issues、Issue comments、Pull requests、Pull request reviews、Pull request review comments；如需实时 CI 状态，同时订阅 Check runs、Check suites、Workflow runs。
+- `CHECK_RUN` 等 CI 事件只写入会话的 CI 栏，不触发整仓库同步；未配置 Webhook 时由打开会话的增量同步与 `CONVERSATION_POLL_MINUTES` 轮询兜底。
 
-接收端先验签、按 delivery ID 入库去重，返回 202；后台每 15 秒处理待办，同批最多 50 个事件共享一个接收后的新快照，避免使用事件之前已开始的同步。失败退避重试；GitHub 配额不足时保存快照并显示退避状态。
+接收端先验签、按 delivery ID 入库去重，返回 202；后台每 15 秒处理待办，评论与操作事件直接 upsert，已存在事项不再触发整仓库同步；只有本地缺失事项才回退同步。失败退避重试；GitHub 配额不足时保存已缓存内容并显示退避状态。
 
 没有仓库管理权限时，可先使用轮询和本地分派 / 超期催办，但不能宣称有完整的即时事件通知，也不会通过轮询重建所有评论历史。
 

@@ -16,10 +16,12 @@ test('explicit pending owner is not silently redirected to admin and records unr
   const sent=[];const services=createServices(db,configForTests(),{sendMessage:async m=>sent.push(m)});await services.runReminders();assert.equal(sent.length,0);assert.equal(db.prepare('SELECT error_code FROM notifications').get().error_code,'MEMBER_PENDING');
 });
 
-test('accepted event batch shares exactly one post-receipt snapshot',async t=>{
-  const db=openDatabase(':memory:');t.after(()=>db.close());let reads=0;const services=createServices(db,configForTests(),{fetchItems:async()=>{reads++;return [];}});
+test('accepted event batch does not force a full repository sync',async t=>{
+  const db=openDatabase(':memory:');t.after(()=>db.close());let reads=0;
+  for(let i=0;i<5;i++) insertItem(db,{...testItem(),id:`github:${i+1}`,number:i+1});
+  const services=createServices(db,configForTests(),{fetchItems:async()=>{reads++;return [];}});
   for(let i=0;i<5;i++) services.acceptWebhook({repository:{full_name:'AISBench/benchmark'},issue:{number:i+1},action:'opened'},`batch-${i}`,'issues');
-  await services.processWebhooks();assert.equal(reads,1);assert.equal(db.prepare("SELECT COUNT(*) AS n FROM webhook_inbox WHERE status='done'").get().n,5);
+  await services.processWebhooks();assert.equal(reads,0);assert.equal(db.prepare("SELECT COUNT(*) AS n FROM webhook_inbox WHERE status='done'").get().n,5);
 });
 
 test('local assignment generates notification by member id and transactional version',async t=>{

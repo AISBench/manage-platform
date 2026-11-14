@@ -114,7 +114,7 @@ test('personal preferences/demo send protection and sanitized integration metric
   assert.equal((await c.request('/api/preferences','PATCH',{notificationsEnabled:false,quietStart:'22:00',quietEnd:'08:00'})).data.user.notificationsEnabled,false);
   assert.deepEqual((await c.request('/api/feishu/test','POST',{})).data,{sent:false,demo:true});
   assert.deepEqual((await c.request('/api/reminders/run','POST',{})).data,{queued:0,delivered:0,failed:0,skipped:0});
-  const status=await c.request('/api/admin/integration-status');assert.equal(status.data.schemaVersion,4);assert.equal(status.data.syncIntervalMinutes,10);assert.equal(status.data.membership.pending,1);
+  const status=await c.request('/api/admin/integration-status');assert.equal(status.data.schemaVersion,6);assert.equal(status.data.syncIntervalMinutes,10);assert.equal(status.data.membership.pending,1);
   assert.ok(!JSON.stringify(status.data).includes('test-secret'));assert.equal((await c.request('/api/feishu/binding','DELETE',{})).status,200);
 });
 
