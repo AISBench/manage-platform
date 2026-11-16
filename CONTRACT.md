@@ -57,7 +57,7 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 
 | Method and route | Request / response |
 | --- | --- |
-| GET /api/dashboard | `{stats:{openIssues,openPRs,overdue,myTasks,unassigned,ownerIssues,needsReview,bugIssues,featureIssues},items,activity,lastSync,syncError}`; `bugIssues`/`featureIssues` count open issues carrying the `bug`/`feature` label |
+| GET /api/dashboard | `{stats:{openIssues,openPRs,overdue,myTasks,unassigned,ownerIssues,needsReview,bugIssues,featureIssues,rfcIssues},items,activity,lastSync,syncError}`; `bugIssues`/`featureIssues`/`rfcIssues` count open issues carrying the `bug`/`feature`/`RFC` label |
 | GET /api/items | `{items}`; filters kind,state=open\|closed\|all,mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,label (case-insensitive exact label name) |
 | GET /api/labels | `{labels:[{name,color,description}],canEdit,reason,permissions}`; `canEdit` mirrors the member's GitHub triage/write/admin role; `color` is the six-digit repository label colour |
 | PUT /api/items/:id/labels | `{labels:[≤20 names]}` → `{item,labels}`; writes through to GitHub as the member and needs triage or above; 403 `GITHUB_WRITE_UNAUTHORIZED` / `GITHUB_LABEL_FORBIDDEN`, 422 `LABEL_UNKNOWN`; demo mode only edits local data |

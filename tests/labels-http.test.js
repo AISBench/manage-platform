@@ -22,6 +22,11 @@ test('label catalogue, dashboard counts and label filter stay consistent', async
 
   const featureItems = await c.request('/api/items?state=open&kind=issue&label=Feature');
   assert.equal(featureItems.data.items.length, dashboard.data.stats.featureIssues, 'label filtering is case-insensitive');
+
+  const rfcItems = await c.request('/api/items?state=open&kind=issue&label=RFC');
+  assert.ok(dashboard.data.stats.rfcIssues >= 1);
+  assert.equal(rfcItems.data.items.length, dashboard.data.stats.rfcIssues, 'the RFC dashboard count matches its filtered list');
+  assert.ok(rfcItems.data.items.every(item => item.labels.some(name => name.toLowerCase() === 'rfc')));
   assert.equal((await f.client(null).request('/api/labels')).status, 401);
 });
 

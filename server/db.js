@@ -280,11 +280,11 @@ export function seedDemo(db, repo) {
     ['pr', '修复并发请求场景下的 token 统计', 'contributor-zhou', ['demo-maintainer'], ['bug'], 54, 'failure'],
     ['issue', '增加自定义数据集接入文档', 'demo-maintainer', [], ['documentation'], 12, null],
     ['pr', '优化数据集缓存与加载性能', 'reviewer-chen', ['demo-maintainer'], ['performance'], 20, 'success'],
-    ['issue', '新增模型后端适配需求', 'contributor-wang', [], ['enhancement', 'feature'], 96, null],
+    ['issue', '新增模型后端适配需求', 'contributor-wang', [], ['enhancement', 'feature', 'RFC'], 96, null],
     ['issue', 'Windows 环境安装说明补充', 'reviewer-chen', [], ['documentation'], 2, null],
     ['pr', '更新评测任务配置示例', 'demo-maintainer', [], ['documentation'], 4, 'success'],
   ];
-  const demoLabels = [['bug', 'd73a4a'], ['documentation', '0075ca'], ['enhancement', 'a2eeef'], ['feature', '1d76db'], ['help wanted', '008672'], ['performance', 'fbca04'], ['good first issue', '7057ff'], ['question', 'd876e3']];
+  const demoLabels = [['bug', 'd73a4a'], ['documentation', '0075ca'], ['enhancement', 'a2eeef'], ['feature', '1d76db'], ['help wanted', '008672'], ['performance', 'fbca04'], ['good first issue', '7057ff'], ['question', 'd876e3'], ['RFC', '244fc0']];
   const ids = { 'demo-maintainer': '1001', 'reviewer-chen': '1002', 'contributor-li': '2001', 'contributor-zhou': '2002', 'contributor-wang': '2003' };
   db.exec('BEGIN IMMEDIATE');
   try {
