@@ -1,4 +1,40 @@
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+
+function validKey(key) {
+  return typeof key === 'string' && key.length > 0 && Buffer.from(key, 'base64').length === 32;
+}
+
+// Keep zero-config deployments usable without making tokens undecryptable on
+// every restart: generate once next to the database and reuse that file.
+export function ensureTokenEncryptionKey(config) {
+  if (config.demo) return '';
+  if (config.tokenEncryptionKey) {
+    if (!validKey(config.tokenEncryptionKey)) throw new Error('TOKEN_ENCRYPTION_KEY must be a base64-encoded 32-byte key');
+    return config.tokenEncryptionKey;
+  }
+  const file = path.join(path.dirname(config.dbPath), 'token-encryption.key');
+  if (existsSync(file)) {
+    const key = readFileSync(file, 'utf8').trim();
+    if (!validKey(key)) throw new Error(`Invalid token encryption key file: ${file}`);
+    config.tokenEncryptionKey = key;
+    config.tokenEncryptionKeyFile = file;
+    return key;
+  }
+  try {
+    mkdirSync(path.dirname(file), { recursive: true });
+    const key = randomBytes(32).toString('base64');
+    writeFileSync(file, `${key}\n`, { mode: 0o600 });
+    config.tokenEncryptionKey = key;
+    config.tokenEncryptionKeyFile = file;
+    config.tokenEncryptionKeyGenerated = true;
+    return key;
+  } catch {
+    console.warn(`Unable to create ${file}; GitHub write tokens stay disabled until TOKEN_ENCRYPTION_KEY is configured.`);
+    return '';
+  }
+}
 
 export function loadConfig(env = process.env) {
   const demo=env.DEMO_MODE==='true', port=Number(env.PORT || 3210);

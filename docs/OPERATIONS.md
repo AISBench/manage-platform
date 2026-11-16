@@ -93,6 +93,7 @@ docker compose exec platform node server/cli.js backup --output /app/data/backup
 
 - 文件名应按每次备份时间生成，不覆盖既有备份。样例日期仅为示意。
 - 备份含团队身份、事务和绑定信息，需加密并至少存一份到服务器之外；数据卷内副本不算异地备份。
+- 若使用自动生成的 Token 加密密钥，`DATA_DIR/token-encryption.key` 必须与数据库一起备份并保持 `0600` 权限；丢失后所有成员需要重新授权 GitHub 写权限。多实例共享数据库时应在环境变量中显式配置同一个 `TOKEN_ENCRYPTION_KEY`。
 - 每日备份与保留策略由部署者在服务器运维系统中显式配置；本次代码不会自动安装 cron 或修改服务器任务。
 - 恢复必须使用隔离数据库和环境，先关闭提醒与出站发送；核对成员 / 角色、事务、迁移版本、队列与日志，再决定正式切换。
 - 受制于飞书上游去重窗口，恢复旧备份可能重新出现已投递任务；不能盲目启用发送器，也不能承诺严格 exactly-once。
@@ -105,7 +106,7 @@ docker compose exec platform node server/cli.js backup --output /app/data/backup
 | 成员 GitHub 登录后被拒绝 | 数据库中是否预录入正确固定 ID、是否停用；运行时修改环境白名单无效 |
 | 无法停用 / 降级管理员 | 是否最后一位正常且已激活管理员；待激活管理员不能作为兜底 |
 | 成员无法接收飞书 | 是否本人绑定当前 App ID、是否测试确认、通知开关 / 免打扰、成员状态、应用发布 / 可用范围 / 权限 |
-| 提示未授权 GitHub 评论写权限，或授权后仍回到工作区 | 服务端是否配置 32 字节 base64 的 `TOKEN_ENCRYPTION_KEY`；启动日志是否有对应警告；`GITHUB_OAUTH_SCOPE` 是否含 `public_repo`（私有仓库用 `repo`）；修改 scope 后需撤销授权并重新登录 |
+| 提示未授权 GitHub 评论写权限，或授权后仍回到工作区 | 服务端是否配置 32 字节 base64 的 `TOKEN_ENCRYPTION_KEY`，或 `DATA_DIR/token-encryption.key` 是否可读写；启动日志是否有对应警告；`GITHUB_OAUTH_SCOPE` 是否含 `public_repo`（私有仓库用 `repo`）；修改 scope 后需撤销授权并重新登录 |
 | 已启用成员仍不可达 | 停用保留关联但撤销验证，需要本人重新测试；换 App ID 需要重新绑定 |
 | 绑定或测试冲突 | 期间发生解绑、重绑、会话切换或停用；旧操作被拒绝是保护机制，重新发起当前操作 |
 | 提醒显示取消但有送达审计 | 外部服务已接受请求时权限恰好撤销，无法召回；查看 DELIVERED_AFTER_REVOCATION，而不是重试 |
