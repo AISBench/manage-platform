@@ -275,6 +275,12 @@ export async function replaceIssueLabels({ repo, number, token, labels, fetchImp
     clearTimeout(timer);
   }
 }
+export async function fetchIssueDetail({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  const { data } = await request(`${base}/issues/${issueNumber(number)}`);
+  if (!data || data.number !== number || !['open', 'closed'].includes(data.state)) throw new IntegrationError('GitHub returned invalid issue data');
+  return data;
+}
 export async function fetchPullRequestDetail({ repo, number, token, fetchImpl = fetch }) {
   const { base, request } = reader(repo, token, fetchImpl);
   const { data } = await request(`${base}/pulls/${issueNumber(number)}`);

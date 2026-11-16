@@ -237,7 +237,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   });
   app.get('/api/items/unread',(req,res)=>{z.object({}).strict().parse(req.query);const summary=unreadSummary(db,req.member.id);res.json({items:summary,total:Object.values(summary).reduce((sum,item)=>sum+item.unread,0),mentions:Object.values(summary).reduce((sum,item)=>sum+item.mentions,0)});});
   app.get('/api/items',(req,res)=>{
-    let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,label}=req.query;
+    let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,unread,mentions,label}=req.query;
     if(kind) items=items.filter(i=>i.kind===kind);
     if(label) items=items.filter(i=>hasLabel(i,label));
     if(state!=='all') items=items.filter(i=>i.state===state);
@@ -247,6 +247,10 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(ownerIssue==='true') items=items.filter(i=>i.ownerIssue);
     if(needsReview==='true') items=items.filter(i=>i.needsReview);
     if(module) items=items.filter(i=>i.module===module);
+    if(unread==='true'||mentions==='true') {
+      const summary=unreadSummary(db,req.member.id);
+      items=items.filter(i=>unread==='true' ? (summary[i.id]?.unread||0)>0 : (summary[i.id]?.mentions||0)>0);
+    }
     if(typeof q==='string') {const search=q.slice(0,200).toLowerCase();items=items.filter(i=>`${i.title} ${i.number} ${i.author} ${(i.labels||[]).join(' ')}`.toLowerCase().includes(search));}
     res.json({items:withUnread(items,req.member.id)});
   });
