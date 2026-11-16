@@ -52,14 +52,15 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   }
   function signInMember(profile,req,res,{accessToken='',scopes=''}={}) {
     const githubId=identityId(profile.githubId ?? profile.id);
+    let writeStored=false;
     const userId=transact(()=>{
       // GitHub login links or creates the member account automatically; no
       // application or administrator approval is involved.
       const member=autoProvisionMemberInTransaction(db,{profile:{...profile,githubId},requestId:req.requestId});
       const avatar=config.demo ? (profile.avatarUrl || '') : githubAvatar({...profile,githubId});
       if(accessToken&&!config.demo) {
-        const stored=saveGitHubToken(db,{memberId:member.id,login:profile.login,githubUserId:githubId,token:accessToken,scopes:scopes || config.githubOAuthScope},config);
-        if(stored) addAudit(db,{actorId:member.id,action:'github.write_authorized',targetType:'member',targetId:member.id,after:{scopes:scopes || config.githubOAuthScope},requestId:req.requestId});
+        writeStored=saveGitHubToken(db,{memberId:member.id,login:profile.login,githubUserId:githubId,token:accessToken,scopes:scopes || config.githubOAuthScope},config);
+        if(writeStored) addAudit(db,{actorId:member.id,action:'github.write_authorized',targetType:'member',targetId:member.id,after:{scopes:scopes || config.githubOAuthScope},requestId:req.requestId});
       }
       const existing=db.prepare('SELECT id FROM users WHERE member_id=?').get(member.id),uid=existing?.id || githubId;
       db.prepare('UPDATE users SET login=? WHERE login=? COLLATE NOCASE AND id<>?').run(`archived-${randomUUID()}`,profile.login,uid);
@@ -69,6 +70,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       clearBrowserSessions(req,res);return uid;
     });
     createSession(db,res,userId,config);
+    return writeStored;
   }
   // Keep the generation outside the binding row: deleting/recreating a row
   // must never recycle version 1 while an old OAuth/test request is in flight.
@@ -133,7 +135,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
     const policy=getAccessPolicy(db);
-    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
@@ -160,14 +162,28 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const oauth=consumeOAuthState(db,req,res,'github',config);
     let context={};try {context=JSON.parse(oauth.user_id || '{}');} catch { /* legacy state has no navigation context */ }
     if(typeof req.query.code!=='string') throw fail(400,'GitHub 授权未完成');
-    const {data:token}=await requestJson('https://github.com/login/oauth/access_token',{fetchImpl,method:'POST',headers:{Accept:'application/json','Content-Type':'application/json'},body:JSON.stringify({client_id:config.githubClientId,client_secret:config.githubClientSecret,code:req.query.code,redirect_uri:`${config.baseUrl}/auth/github/callback`}),label:'GitHub OAuth'});
+    let token;
+    try {
+      ({data:token}=await requestJson('https://github.com/login/oauth/access_token',{fetchImpl,method:'POST',headers:{Accept:'application/json','Content-Type':'application/json'},body:JSON.stringify({client_id:config.githubClientId,client_secret:config.githubClientSecret,code:req.query.code,redirect_uri:`${config.baseUrl}/auth/github/callback`}),label:'GitHub OAuth'}));
+    } catch (error) {
+      console.warn(`[${req.requestId}] GitHub OAuth token exchange failed (${error.name || 'Error'}${error.status ? ` ${error.status}` : ''})`);
+      throw Object.assign(fail(502,'无法连接 GitHub 完成授权，请检查服务器到 github.com 的网络或代理后重试'),{code:'GITHUB_OAUTH_UNAVAILABLE'});
+    }
     if(typeof token.access_token!=='string') throw fail(502,'GitHub 登录换取授权失败');
-    const {data:profile}=await requestJson('https://api.github.com/user',{fetchImpl,headers:{Authorization:`Bearer ${token.access_token}`,Accept:'application/vnd.github+json','User-Agent':'aisbench-triage','X-GitHub-Api-Version':'2022-11-28'},label:'GitHub identity'});
+    let profile;
+    try {
+      ({data:profile}=await requestJson('https://api.github.com/user',{fetchImpl,headers:{Authorization:`Bearer ${token.access_token}`,Accept:'application/vnd.github+json','User-Agent':'aisbench-triage','X-GitHub-Api-Version':'2022-11-28'},label:'GitHub identity'}));
+    } catch (error) {
+      console.warn(`[${req.requestId}] GitHub OAuth profile request failed (${error.name || 'Error'}${error.status ? ` ${error.status}` : ''})`);
+      throw Object.assign(fail(502,'无法读取 GitHub 账号信息，请检查服务器到 github.com 的网络或代理后重试'),{code:'GITHUB_OAUTH_UNAVAILABLE'});
+    }
     const githubId=identityId(profile.id);if(!githubId||typeof profile.login!=='string'||profile.type!=='User') throw fail(502,'无效 GitHub 个人身份');
     const member=db.prepare('SELECT status FROM members WHERE github_user_id=?').get(githubId);
     if(member?.status==='disabled') throw fail(403,'该成员已停用，请联系管理员');
-    signInMember(profile,req,res,{accessToken:token.access_token,scopes:typeof token.scope==='string'?token.scope:''});
-    const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);url.searchParams.set('auth','success');
+    const stored=signInMember(profile,req,res,{accessToken:token.access_token,scopes:typeof token.scope==='string'?token.scope:''});
+    const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);
+    if(!stored) url.searchParams.set('error','write_storage_unavailable');
+    else url.searchParams.set('auth','success');
     res.redirect(url.pathname+url.search+url.hash);
   });
   app.get('/auth/feishu/bind',requireUser,(req,res)=>{
@@ -364,7 +380,9 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(res.headersSent) return;
     if(error instanceof z.ZodError) return res.status(400).json({error:'输入参数不合法，请检查字段格式和范围'});
     const status=error.status>=400&&error.status<600?error.status:502;
-    res.status(status).json({error:status<500?error.message:'外部服务或平台请求失败，请检查配置与连接',requestId:_req.requestId});
+    if(status>=500) console.error(`[${_req.requestId}] ${_req.method} ${_req.path} failed: ${error.name || 'Error'}${error.status ? ` status=${error.status}` : ''}${error.code ? ` code=${error.code}` : ''}`);
+    const safe=status<500||error.code==='GITHUB_OAUTH_UNAVAILABLE';
+    res.status(status).json({error:safe?error.message:'外部服务或平台请求失败，请检查配置与连接',requestId:_req.requestId});
   });
   return {app,db,services};
 }

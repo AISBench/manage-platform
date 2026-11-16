@@ -103,7 +103,7 @@ npm start
 
 ### 3. GitHub 应用与仓库读取
 
-创建 GitHub OAuth App：Homepage 为 `BASE_URL`，回调为 `BASE_URL/auth/github/callback`。登录默认申请 `read:user public_repo`（私有仓库改为 `repo`），用于读取身份、以成员本人身份新增 Issue 评论，以及重试 GitHub Actions 工作流。OAuth 访问 Token 使用 `TOKEN_ENCRYPTION_KEY`（AES-256-GCM）加密保存；未配置密钥时仍可登录和查看会话，但不能在平台发言或触发 CI 重试。评论与重试永远不用于仓库代码写入。
+创建 GitHub OAuth App：Homepage 为 `BASE_URL`，回调为 `BASE_URL/auth/github/callback`。登录默认申请 `read:user public_repo`（私有仓库改为 `repo`），用于读取身份、以成员本人身份新增 Issue 评论，以及重试 GitHub Actions 工作流。OAuth 访问 Token 使用 `TOKEN_ENCRYPTION_KEY`（AES-256-GCM）加密保存；留空时首次启动会自动生成在 `DATA_DIR/token-encryption.key` 并复用，需与数据库一起备份；多实例共享数据库时必须显式配置同一个密钥。未配置且无法生成密钥时仍可登录和查看会话，但不能在平台发言或触发 CI 重试。评论与重试永远不用于仓库代码写入。
 
 仓库读取使用服务器独立凭证。公开仓库可匿名读取，但完整 PR / CI 同步容易耗尽匿名配额；应按目标仓库和组织策略配置适用的只读 PAT 或后续 GitHub App 方案。只申请读取 Metadata / Issues / Pull requests / Checks / Commit statuses 所需权限，不给平台自动写入权限。
 

@@ -80,6 +80,14 @@ test('item list can filter to unread and mention items', async t => {
   assert.ok(unread.data.items.length <= all.data.items.length);
 });
 
+test('session reports GitHub write configuration and OAuth scopes', async t => {
+  const f = await httpFixture(t, { config: { demo: true, tokenEncryptionKey: '', githubOAuthScope: 'read:user' } });
+  const session = await f.client('demo-admin').request('/api/session');
+  assert.equal(session.status, 200);
+  assert.equal(session.data.githubWriteConfigured, false);
+  assert.equal(session.data.githubOAuthScopes, 'read:user');
+});
+
 test('demo member can send a local conversation message without GitHub', async t => {
   const f = await httpFixture(t, { config: { demo: true } });
   const c = f.client('demo-admin');
