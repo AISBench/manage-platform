@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { listItems, getSetting, setSetting, addActivity, addAudit } from './db.js';
-import { fetchRepositoryItems, identityId } from './integrations/github.js';
+import { fetchRepositoryItems, fetchRepositoryLabels, identityId } from './integrations/github.js';
 import { sendFeishuMessage } from './integrations/feishu.js';
 import { createPublicService } from './public-service.js';
 import { syncConversationBatch, upsertFromWebhook } from './conversation.js';
+import { syncRepositoryLabels } from './labels.js';
 
 export function isQuietTime(start,end,now=new Date()) {
   if (!start || !end || start===end) return false;
@@ -60,9 +61,14 @@ export function createServices(db,config,integrations={}) {
     try {
       const publication=await publicPortal.beginProjection();
       const snapshot=await fetchItems({repo:config.repo,token:config.githubToken});
+      // Injected item fetchers mean a test/offline sync; never add network calls then.
+      const labelSnapshot=integrations.fetchLabels
+        ? await integrations.fetchLabels({repo:config.repo,token:config.githubToken}).catch(()=>null)
+        : integrations.fetchItems ? null : await fetchRepositoryLabels({repo:config.repo,token:config.githubToken}).catch(()=>null);
       const publicSnapshot=await publicPortal.finishProjection(publication,snapshot);
       db.exec('BEGIN IMMEDIATE');
       try {
+        if(labelSnapshot) syncRepositoryLabels(db,labelSnapshot);
         for (const item of snapshot) {
           const old=db.prepare('SELECT * FROM items WHERE id=?').get(item.id);
           if (!old) db.prepare('INSERT INTO items(id,number,data,repository_id) VALUES (?,?,?,?)').run(item.id,item.number,JSON.stringify(item),config.repo);

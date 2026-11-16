@@ -83,7 +83,7 @@ export default function ItemDetail({ itemId, user, session, notify, onBack }) {
       <aside className="item-detail-side">
         <div className={tab === 'ci' ? 'side-active' : ''}><CIColumn events={sideEvents.ci} itemId={itemId} user={user} session={session} notify={notify} onChanged={() => load({ refresh: false })} onCiTriggered={trackCi} /></div>
         <div className={tab === 'operations' ? 'side-active' : ''}><OperationsColumn events={sideEvents.operation} /></div>
-        <div className={tab === 'info' ? 'side-active' : ''}><InfoColumn item={item} user={user} onSaved={() => load({ refresh: false })} /></div>
+        <div className={tab === 'info' ? 'side-active' : ''}><InfoColumn item={item} user={user} notify={notify} onSaved={() => load({ refresh: false })} /></div>
       </aside>
     </div>
   </div>;

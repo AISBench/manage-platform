@@ -3,8 +3,9 @@ import { Check, LoaderCircle, UserRound } from 'lucide-react';
 import { api } from './api.js';
 import { Avatar, ErrorBox, OWNER_ISSUES, OwnerOptions, isMine, useResource } from './ui.jsx';
 import { ASSIGNEE_STATUS, PRIORITIES, WORKFLOWS, labelMapping, localDateTime, mapGithubAssignees } from './workflow.js';
+import { LabelChip, colorOf } from './Labels.jsx';
 
-export default function ItemWorkflow({ item, user, onSaved }) {
+export default function ItemWorkflow({ item, user, onSaved, catalog = [] }) {
   const [current, setCurrent] = useState(item);
   const makeForm = source => ({ workflow: source.workflow || 'todo', priority: source.priority || 'normal', ownerMemberId: source.ownerMemberId || '', dueAt: localDateTime(source.dueAt) });
   const [form, setForm] = useState(() => makeForm(item));
@@ -56,7 +57,7 @@ export default function ItemWorkflow({ item, user, onSaved }) {
     {!user.isAdmin && !current.ownerMemberId && current.state === 'open' && current.ownerIssue !== 'legacy_unresolved' && <div className="claim-action"><button className="btn btn-primary" onClick={() => mutate(true)} disabled={saving || error?.status === 409}><UserRound size={15} />认领给我</button><p>原子校验尚未分派，不可抢占他人任务。</p></div>}
     <div className="github-link">
       <div className="github-link-row"><span className="github-link-label">GitHub Assignee</span><div className="assignee-chips">{assignees.length ? assignees.map(assignee => <span key={assignee.login} className={`assignee-chip is-${assignee.status}`} title={assignee.status === 'active' ? '该 GitHub 用户已在平台认证' : '该 GitHub 用户尚未在平台认证，无法分派或接收提醒'}><Avatar login={assignee.login} src={assignee.avatarUrl} size="tiny" />{assignee.name}{assignee.name !== assignee.login ? ` @${assignee.login}` : ''}<em>{ASSIGNEE_STATUS[assignee.status] || '未认证'}</em></span>) : <span className="muted">无</span>}</div></div>
-      <div className="github-link-row"><span className="github-link-label">GitHub 标签</span><div className="label-map-chips">{(current.labels || []).length ? current.labels.map(label => { const mapped = mappedFor(label); return <span key={label} className={`label-chip ${mapped.length ? 'is-mapped' : ''}`}>{label}{mapped.length > 0 && <em>→ {mapped.join(' / ')}</em>}</span>; }) : <span className="muted">无</span>}</div></div>
+      <div className="github-link-row"><span className="github-link-label">GitHub 标签</span><div className="label-map-chips">{(current.labels || []).length ? current.labels.map(label => { const mapped = mappedFor(label); return <LabelChip key={label} name={label} color={colorOf(catalog, label)} mapped={mapped} />; }) : <span className="muted">无</span>}</div></div>
       {suggestionText.length > 0 && <div className="label-suggestion"><span>GitHub 标签建议：{suggestionText.join(' · ')}</span>{needsApply ? <button type="button" className="text-button" disabled={!related || saving} onClick={applySuggestions}>采用建议</button> : <span className="muted">已与标签一致</span>}</div>}
     </div>
     <form onSubmit={e => mutate(false, e)}>
