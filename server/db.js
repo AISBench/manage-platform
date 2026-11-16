@@ -30,7 +30,7 @@ export function openDatabase(filename) {
     try {
       db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 6)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 7)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -186,6 +186,16 @@ export function openDatabase(filename) {
         addColumn(db, 'item_messages', 'side', 'TEXT');
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(6, new Date().toISOString());
       }
+      if (!applied.has(7)) {
+        // Label colours live on the repository, not on each issue, so the
+        // platform mirrors the repository label catalogue once per sync.
+        db.exec(`CREATE TABLE IF NOT EXISTS repository_labels (
+          name TEXT PRIMARY KEY COLLATE NOCASE,
+          color TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL);`);
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(7, new Date().toISOString());
+      }
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));
       db.exec('COMMIT');
@@ -270,10 +280,11 @@ export function seedDemo(db, repo) {
     ['pr', '修复并发请求场景下的 token 统计', 'contributor-zhou', ['demo-maintainer'], ['bug'], 54, 'failure'],
     ['issue', '增加自定义数据集接入文档', 'demo-maintainer', [], ['documentation'], 12, null],
     ['pr', '优化数据集缓存与加载性能', 'reviewer-chen', ['demo-maintainer'], ['performance'], 20, 'success'],
-    ['issue', '新增模型后端适配需求', 'contributor-wang', [], ['enhancement'], 96, null],
+    ['issue', '新增模型后端适配需求', 'contributor-wang', [], ['enhancement', 'feature', 'RFC'], 96, null],
     ['issue', 'Windows 环境安装说明补充', 'reviewer-chen', [], ['documentation'], 2, null],
     ['pr', '更新评测任务配置示例', 'demo-maintainer', [], ['documentation'], 4, 'success'],
   ];
+  const demoLabels = [['bug', 'd73a4a'], ['documentation', '0075ca'], ['enhancement', 'a2eeef'], ['feature', '1d76db'], ['help wanted', '008672'], ['performance', 'fbca04'], ['good first issue', '7057ff'], ['question', 'd876e3'], ['RFC', '244fc0']];
   const ids = { 'demo-maintainer': '1001', 'reviewer-chen': '1002', 'contributor-li': '2001', 'contributor-zhou': '2002', 'contributor-wang': '2003' };
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -286,6 +297,9 @@ export function seedDemo(db, repo) {
     for (const [userId, login, name, memberId] of [['demo', 'demo-maintainer', '演示维护者', 'demo-admin'], ['demo-2', 'reviewer-chen', '陈同学', 'demo-reviewer']]) {
       db.prepare('INSERT OR IGNORE INTO users(id,login,name,member_id) VALUES (?,?,?,?)').run(userId, login, name, memberId);
       if (upgrading) db.prepare('UPDATE users SET member_id=? WHERE id=? AND login=? COLLATE NOCASE AND member_id IS NULL').run(memberId, userId, login);
+    }
+    for (const [name, color] of demoLabels) {
+      db.prepare('INSERT OR IGNORE INTO repository_labels(name,color,description,updated_at) VALUES (?,?,?,?)').run(name, color, '', now);
     }
     let inserted = 0;
     examples.forEach(([kind, title, author, reviewers, labels, hours, ciStatus], index) => {

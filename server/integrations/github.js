@@ -222,6 +222,59 @@ export async function fetchIssueTimeline({ repo, number, token, fetchImpl = fetc
   const { base, request } = reader(repo, token, fetchImpl);
   return paginate(`${base}/issues/${issueNumber(number)}/timeline?per_page=100&page=1`, request, data => data);
 }
+export async function fetchRepositoryLabels({ repo, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/labels?per_page=100&page=1`, request, data => data);
+}
+// The repository payload is the only place GitHub exposes the member's role.
+export async function fetchRepositoryPermissions({ repo, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  const { data } = await request(base);
+  const permissions = data?.permissions;
+  if (!permissions || typeof permissions !== 'object') throw new IntegrationError('GitHub returned invalid repository permissions');
+  return { admin: permissions.admin === true, maintain: permissions.maintain === true, push: permissions.push === true, triage: permissions.triage === true, pull: permissions.pull === true };
+}
+// Replace every label on an issue/PR as the member. GitHub rejects this with 403
+// when the member cannot triage the repository, which keeps platform and GitHub
+// label permissions identical.
+export async function replaceIssueLabels({ repo, number, token, labels, fetchImpl = fetch }) {
+  const base = repoBase(repo);
+  requiredString(token, 'GitHub write token');
+  const payload = (Array.isArray(labels) ? labels : []).map(name => requiredString(name, 'label', 100));
+  const headers = {
+    Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
+    'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}`,
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    let response;
+    try {
+      response = await fetchImpl(`${base}/issues/${issueNumber(number)}/labels`, {
+        method: 'PUT', headers, body: JSON.stringify({ labels: payload }), redirect: 'error', signal: controller.signal,
+      });
+    } catch {
+      throw new IntegrationError('GitHub label update request failed');
+    }
+    if (!response?.ok) {
+      const status = response?.status;
+      const error = new IntegrationError(`GitHub label update failed${Number.isInteger(status) ? ` (HTTP ${status})` : ''}`, status);
+      if (status === 429 || (status === 403 && response.headers?.get('x-ratelimit-remaining') === '0')) {
+        const reset = Number(response.headers?.get('x-ratelimit-reset')) * 1000;
+        error.retryAt = Number.isFinite(reset) && reset > Date.now() ? reset : Date.now() + 60000;
+      } else if (status === 403) {
+        try { if ((await response.text()).includes('OAuth App access restrictions')) error.code = 'GITHUB_ORG_RESTRICTED'; } catch { /* ignore */ }
+      }
+      throw error;
+    }
+    let data;
+    try { data = await response.json(); } catch { throw new IntegrationError('GitHub returned invalid label data'); }
+    if (!Array.isArray(data)) throw new IntegrationError('GitHub returned invalid label data');
+    return data.map(label => typeof label?.name === 'string' ? label.name : '').filter(Boolean);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 export async function fetchIssueDetail({ repo, number, token, fetchImpl = fetch }) {
   const { base, request } = reader(repo, token, fetchImpl);
   const { data } = await request(`${base}/issues/${issueNumber(number)}`);

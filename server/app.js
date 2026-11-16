@@ -15,6 +15,7 @@ import { autoProvisionMemberInTransaction, githubAvatar, getMemberView, listMemb
 import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
 import { saveGitHubToken, deleteGitHubToken } from './github-tokens.js';
 import { listConversation, syncItemConversation, postPlatformMessage, retryPlatformMessage, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto } from './conversation.js';
+import { listLabels, labelWriteAccess, updateItemLabels, hasLabel } from './labels.js';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const version=z.number().int().positive(), id=z.string().min(1).max(100), short=z.string().trim().max(120);
@@ -221,12 +222,24 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.get('/api/dashboard',(req,res)=>{
     const items=withUnread(allItems(),req.member.id),open=items.filter(i=>i.state==='open');
     const unreadTotal=items.reduce((sum,item)=>sum+item.unreadCount,0),mentionTotal=items.reduce((sum,item)=>sum+item.mentionCount,0);
-    res.json({stats:{openIssues:open.filter(i=>i.kind==='issue').length,openPRs:open.filter(i=>i.kind==='pr').length,overdue:open.filter(i=>i.overdue).length,myTasks:open.filter(i=>i.workflow!=='done'&&isParticipant(i,req.user)).length,unassigned:open.filter(i=>!i.ownerMemberId).length,ownerIssues:open.filter(i=>i.ownerIssue).length,needsReview:open.filter(i=>i.needsReview).length,unreadMessages:unreadTotal,mentions:mentionTotal},items,activity:db.prepare('SELECT id,title,detail,created_at AS createdAt FROM activity ORDER BY created_at DESC LIMIT 20').all(),lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError')});
+    res.json({stats:{openIssues:open.filter(i=>i.kind==='issue').length,openPRs:open.filter(i=>i.kind==='pr').length,overdue:open.filter(i=>i.overdue).length,myTasks:open.filter(i=>i.workflow!=='done'&&isParticipant(i,req.user)).length,unassigned:open.filter(i=>!i.ownerMemberId).length,ownerIssues:open.filter(i=>i.ownerIssue).length,needsReview:open.filter(i=>i.needsReview).length,unreadMessages:unreadTotal,mentions:mentionTotal,bugIssues:open.filter(i=>i.kind==='issue'&&hasLabel(i,'bug')).length,featureIssues:open.filter(i=>i.kind==='issue'&&hasLabel(i,'feature')).length,rfcIssues:open.filter(i=>i.kind==='issue'&&hasLabel(i,'rfc')).length},items,activity:db.prepare('SELECT id,title,detail,created_at AS createdAt FROM activity ORDER BY created_at DESC LIMIT 20').all(),lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError')});
+  });
+  app.get('/api/labels',async(req,res)=>{
+    z.object({}).strict().parse(req.query);
+    const access=await labelWriteAccess(db,config,req.member.id);
+    res.json({labels:listLabels(db),canEdit:access.canEdit,reason:access.reason,permissions:access.permissions});
+  });
+  app.put('/api/items/:id/labels',rateLimit({windowMs:60000,limit:20,keyGenerator:req=>`item-labels:${req.member.id}`}),async(req,res)=>{
+    fresh(req);
+    const body=z.object({labels:z.array(z.string().trim().min(1).max(100)).max(20)}).strict().parse(req.body);
+    const result=await updateItemLabels(db,config,{member:req.member,itemId:req.params.id,labels:body.labels,requestId:req.requestId});
+    res.json({item:allItems().find(item=>item.id===req.params.id),labels:result.labels});
   });
   app.get('/api/items/unread',(req,res)=>{z.object({}).strict().parse(req.query);const summary=unreadSummary(db,req.member.id);res.json({items:summary,total:Object.values(summary).reduce((sum,item)=>sum+item.unread,0),mentions:Object.values(summary).reduce((sum,item)=>sum+item.mentions,0)});});
   app.get('/api/items',(req,res)=>{
-    let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,unread,mentions}=req.query;
+    let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,unread,mentions,label}=req.query;
     if(kind) items=items.filter(i=>i.kind===kind);
+    if(label) items=items.filter(i=>hasLabel(i,label));
     if(state!=='all') items=items.filter(i=>i.state===state);
     if(mine==='true') items=items.filter(i=>isParticipant(i,req.user));
     if(ownerMemberId) items=items.filter(i=>i.ownerMemberId===ownerMemberId);
