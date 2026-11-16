@@ -54,7 +54,12 @@ export function deleteGitHubToken(db, memberId) {
 
 export function githubTokenStatus(db, memberId) {
   const row = db.prepare('SELECT github_login,github_user_id,scopes,authorized_at,last_verified_at FROM github_user_tokens WHERE member_id=?').get(memberId);
-  return row ? { ready: true, login: row.github_login, scopes: row.scopes || '', authorizedAt: row.authorized_at, verifiedAt: row.last_verified_at } : { ready: false, login: null, scopes: '', authorizedAt: null, verifiedAt: null };
+  if (!row) return { ready: false, login: null, scopes: '', authorizedAt: null, verifiedAt: null };
+  const scopes = row.scopes || '';
+  // Legacy rows without recorded scopes stay usable; otherwise require a scope
+  // that can write to the repository (public_repo or repo).
+  const ready = !scopes || /(^|[\s,])(repo|public_repo)([\s,]|$)/.test(scopes);
+  return { ready, login: row.github_login, scopes, authorizedAt: row.authorized_at, verifiedAt: row.last_verified_at };
 }
 
 export function markGitHubTokenVerified(db, memberId) {

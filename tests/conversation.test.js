@@ -208,6 +208,10 @@ test('GitHub tokens are encrypted at rest and can be revoked', t => {
   assert.equal(saveGitHubToken(db, { memberId: member.id, login: 'alice', githubUserId: '999', token: 'secret-token', scopes: 'read:user public_repo' }, config()), true);
   assert.equal(getGitHubToken(db, member.id, config()), 'secret-token');
   assert.equal(githubTokenStatus(db, member.id).ready, true);
+  saveGitHubToken(db, { memberId: member.id, login: 'alice', githubUserId: '999', token: 'secret-token', scopes: 'read:user' }, config());
+  assert.equal(githubTokenStatus(db, member.id).ready, false, 'read-only scopes are not reported as writable');
+  saveGitHubToken(db, { memberId: member.id, login: 'alice', githubUserId: '999', token: 'secret-token', scopes: 'read:user public_repo' }, config());
+  assert.equal(githubTokenStatus(db, member.id).ready, true);
   const raw = JSON.stringify(db.prepare('SELECT * FROM github_user_tokens').get());
   assert.ok(!raw.includes('secret-token'));
   assert.equal(deleteGitHubToken(db, member.id), 1);
