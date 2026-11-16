@@ -52,14 +52,15 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   }
   function signInMember(profile,req,res,{accessToken='',scopes=''}={}) {
     const githubId=identityId(profile.githubId ?? profile.id);
+    let writeStored=false;
     const userId=transact(()=>{
       // GitHub login links or creates the member account automatically; no
       // application or administrator approval is involved.
       const member=autoProvisionMemberInTransaction(db,{profile:{...profile,githubId},requestId:req.requestId});
       const avatar=config.demo ? (profile.avatarUrl || '') : githubAvatar({...profile,githubId});
       if(accessToken&&!config.demo) {
-        const stored=saveGitHubToken(db,{memberId:member.id,login:profile.login,githubUserId:githubId,token:accessToken,scopes:scopes || config.githubOAuthScope},config);
-        if(stored) addAudit(db,{actorId:member.id,action:'github.write_authorized',targetType:'member',targetId:member.id,after:{scopes:scopes || config.githubOAuthScope},requestId:req.requestId});
+        writeStored=saveGitHubToken(db,{memberId:member.id,login:profile.login,githubUserId:githubId,token:accessToken,scopes:scopes || config.githubOAuthScope},config);
+        if(writeStored) addAudit(db,{actorId:member.id,action:'github.write_authorized',targetType:'member',targetId:member.id,after:{scopes:scopes || config.githubOAuthScope},requestId:req.requestId});
       }
       const existing=db.prepare('SELECT id FROM users WHERE member_id=?').get(member.id),uid=existing?.id || githubId;
       db.prepare('UPDATE users SET login=? WHERE login=? COLLATE NOCASE AND id<>?').run(`archived-${randomUUID()}`,profile.login,uid);
@@ -69,6 +70,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       clearBrowserSessions(req,res);return uid;
     });
     createSession(db,res,userId,config);
+    return writeStored;
   }
   // Keep the generation outside the binding row: deleting/recreating a row
   // must never recycle version 1 while an old OAuth/test request is in flight.
@@ -133,7 +135,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
     const policy=getAccessPolicy(db);
-    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
@@ -166,8 +168,10 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const githubId=identityId(profile.id);if(!githubId||typeof profile.login!=='string'||profile.type!=='User') throw fail(502,'无效 GitHub 个人身份');
     const member=db.prepare('SELECT status FROM members WHERE github_user_id=?').get(githubId);
     if(member?.status==='disabled') throw fail(403,'该成员已停用，请联系管理员');
-    signInMember(profile,req,res,{accessToken:token.access_token,scopes:typeof token.scope==='string'?token.scope:''});
-    const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);url.searchParams.set('auth','success');
+    const stored=signInMember(profile,req,res,{accessToken:token.access_token,scopes:typeof token.scope==='string'?token.scope:''});
+    const target=safeReturnTo(context?.returnTo),url=new URL(target,config.baseUrl);
+    if(!stored) url.searchParams.set('error','write_storage_unavailable');
+    else url.searchParams.set('auth','success');
     res.redirect(url.pathname+url.search+url.hash);
   });
   app.get('/auth/feishu/bind',requireUser,(req,res)=>{

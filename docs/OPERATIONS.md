@@ -105,6 +105,7 @@ docker compose exec platform node server/cli.js backup --output /app/data/backup
 | 成员 GitHub 登录后被拒绝 | 数据库中是否预录入正确固定 ID、是否停用；运行时修改环境白名单无效 |
 | 无法停用 / 降级管理员 | 是否最后一位正常且已激活管理员；待激活管理员不能作为兜底 |
 | 成员无法接收飞书 | 是否本人绑定当前 App ID、是否测试确认、通知开关 / 免打扰、成员状态、应用发布 / 可用范围 / 权限 |
+| 提示未授权 GitHub 评论写权限，或授权后仍回到工作区 | 服务端是否配置 32 字节 base64 的 `TOKEN_ENCRYPTION_KEY`；启动日志是否有对应警告；`GITHUB_OAUTH_SCOPE` 是否含 `public_repo`（私有仓库用 `repo`）；修改 scope 后需撤销授权并重新登录 |
 | 已启用成员仍不可达 | 停用保留关联但撤销验证，需要本人重新测试；换 App ID 需要重新绑定 |
 | 绑定或测试冲突 | 期间发生解绑、重绑、会话切换或停用；旧操作被拒绝是保护机制，重新发起当前操作 |
 | 提醒显示取消但有送达审计 | 外部服务已接受请求时权限恰好撤销，无法召回；查看 DELIVERED_AFTER_REVOCATION，而不是重试 |

@@ -67,6 +67,14 @@ test('item search returns lightweight references for the # picker', async t => {
   assert.equal((await f.client(null).request('/api/items/search?q=9000')).status, 401);
 });
 
+test('session reports GitHub write configuration and OAuth scopes', async t => {
+  const f = await httpFixture(t, { config: { demo: true, tokenEncryptionKey: '', githubOAuthScope: 'read:user' } });
+  const session = await f.client('demo-admin').request('/api/session');
+  assert.equal(session.status, 200);
+  assert.equal(session.data.githubWriteConfigured, false);
+  assert.equal(session.data.githubOAuthScopes, 'read:user');
+});
+
 test('demo member can send a local conversation message without GitHub', async t => {
   const f = await httpFixture(t, { config: { demo: true } });
   const c = f.client('demo-admin');

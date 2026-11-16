@@ -5,10 +5,11 @@ import { httpFixture } from './helpers.js';
 
 const profile = (overrides = {}) => ({ id: 501, login: 'new-alice', name: 'Alice', type: 'User', avatar_url: 'https://avatars.githubusercontent.com/u/501?v=4', ...overrides });
 
-async function setup(t, initial = profile()) {
+const key = Buffer.alloc(32, 5).toString('base64');
+async function setup(t, initial = profile(), config = {}) {
   let current = initial;
   const fetchImpl = async url => new Response(JSON.stringify(String(url).includes('access_token') ? { access_token: 'never-persist-token' } : current), { status: 200, headers: { 'Content-Type': 'application/json' } });
-  const f = await httpFixture(t, { fetchImpl });
+  const f = await httpFixture(t, { fetchImpl, config: { tokenEncryptionKey: key, ...config } });
   const anonymous = f.client(null);
   async function oauth() {
     const start = await anonymous.request('/auth/github');
@@ -52,6 +53,18 @@ test('first GitHub login creates an active member and reuses it on later logins'
   assert.equal(second.data.user.login, 'renamed-alice');
   assert.equal(second.data.user.avatarUrl, 'https://avatars.githubusercontent.com/u/501?v=9');
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM members WHERE github_user_id='501'").get().n, 1);
+});
+
+test('login still succeeds but reports missing write storage when TOKEN_ENCRYPTION_KEY is absent', async t => {
+  const f = await setup(t, profile(), { tokenEncryptionKey: '' });
+  const callback = await f.oauth();
+  assert.equal(callback.status, 302);
+  assert.equal(callback.response.headers.get('location'), '/workspace?error=write_storage_unavailable');
+  const session = await f.anonymous.request('/api/session');
+  assert.equal(session.data.mode, 'member');
+  assert.equal(session.data.githubWriteConfigured, false);
+  assert.equal(session.data.user.githubWriteReady, false);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM github_user_tokens').get().n, 0);
 });
 
 test('avatar falls back to the numeric GitHub URL when the profile omits one', async t => {

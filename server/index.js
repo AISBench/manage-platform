@@ -9,6 +9,7 @@ dedupeStoredCI(db);
 const server=app.listen(config.port,config.host,()=>{
   console.log(`AISBench Triage: ${config.baseUrl} (${config.demo?'DEMO — isolated data':'LIVE'})`);
   if(!config.demo&&!getSetting(db,'membershipInitialized',false)) console.warn('Membership is not initialized. Run the local bootstrap or migrate-members CLI; unlisted users cannot log in.');
+  if(!config.demo&&!config.tokenEncryptionKey) console.warn('TOKEN_ENCRYPTION_KEY is not configured. Members can sign in, but GitHub comment write and Actions rerun tokens cannot be saved.');
 });
 let stopping=false,tickPromise=null,workerPromise=null,conversationPromise=null;
 function cleanup() {
