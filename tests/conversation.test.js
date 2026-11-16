@@ -62,29 +62,42 @@ test('conversation sync stores comments, operation events, CI and mentions', asy
   assert.equal(inline.url, 'https://github.com/x/101#discussion_r4');
 });
 
-test('conversation sync mirrors GitHub close, merge and reopen state', async t => {
+test('conversation sync mirrors GitHub close, merge, reopen and label changes', async t => {
   const db = database(t);
-  insertItem(db, { ...testItem(), id: 'github:201', number: 201, kind: 'pr', headSha: 'b'.repeat(40) });
+  insertItem(db, { ...testItem(), id: 'github:201', number: 201, kind: 'pr', headSha: 'b'.repeat(40), labels: ['feature'] });
   insertItem(db, { ...testItem(), id: 'github:202', number: 202, kind: 'issue' });
+  const detail = (number, remote) => ({
+    number, title: `Remote ${number}`, body: '', html_url: `https://github.com/AISBench/benchmark/pull/${number}`,
+    state: remote.state || 'closed', labels: (remote.labels || []).map(name => ({ name })), assignees: remote.assignees || [],
+    user: { id: 501, login: 'alice' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+    ...(number === 201 ? { requested_reviewers: [], draft: false, mergeable_state: 'unknown', merged: remote.merged === true, merged_at: remote.merged ? '2026-01-02T00:00:00Z' : null, head: { sha: 'b'.repeat(40) } } : {}),
+  });
   const fetchImpl = remote => async url => {
     const target = String(url);
     if (/\/(issues|pulls)\/\d+\/(comments|timeline|reviews)/.test(target)) return json([]);
     if (target.includes('/check-runs')) return json({ check_runs: [] });
     if (target.includes('/statuses')) return json([]);
-    if (target.includes('/pulls/201')) return json({ number: 201, state: remote.pr || 'closed', merged: remote.merged === true, merged_at: remote.merged ? '2026-01-02T00:00:00Z' : null, updated_at: '2026-01-02T00:00:00Z', head: { sha: 'b'.repeat(40) } });
-    if (target.includes('/issues/202')) return json({ number: 202, state: remote.issue || 'closed', updated_at: '2026-01-03T00:00:00Z' });
+    if (target.includes('/pulls/201')) return json(detail(201, remote));
+    if (target.includes('/issues/202')) return json(detail(202, remote));
     return json([]);
   };
-  await syncItemConversation(db, config(), 'github:201', { force: true, fetchImpl: fetchImpl({ merged: true }) });
-  await syncItemConversation(db, config(), 'github:202', { force: true, fetchImpl: fetchImpl({}) });
+  await syncItemConversation(db, config(), 'github:201', { force: true, fetchImpl: fetchImpl({ merged: true, labels: ['feature', 'bugfix'] }) });
+  await syncItemConversation(db, config(), 'github:202', { force: true, fetchImpl: fetchImpl({ labels: ['docs'] }) });
   let pr = JSON.parse(db.prepare('SELECT data FROM items WHERE id=?').get('github:201').data);
   assert.equal(pr.state, 'closed', 'closed PR is reflected without waiting for a full sync');
   assert.equal(pr.merged, true);
   assert.equal(pr.updatedAt, '2026-01-02T00:00:00Z');
+  assert.deepEqual(pr.labels, ['feature', 'bugfix'], 'label changes are mirrored');
+  assert.equal(pr.title, 'Remote 201');
   assert.equal(JSON.parse(db.prepare('SELECT data FROM items WHERE id=?').get('github:202').data).state, 'closed');
+  assert.deepEqual(JSON.parse(db.prepare('SELECT data FROM items WHERE id=?').get('github:202').data).labels, ['docs']);
+  const versionAfterFirst = db.prepare('SELECT version FROM items WHERE id=?').get('github:201').version;
+
+  await syncItemConversation(db, config(), 'github:201', { force: true, fetchImpl: fetchImpl({ state: 'closed', merged: true, labels: ['bugfix', 'feature'] }) });
+  assert.equal(db.prepare('SELECT version FROM items WHERE id=?').get('github:201').version, versionAfterFirst, 'unchanged labels keep the version stable');
 
   db.prepare("UPDATE items SET workflow='done' WHERE id='github:201'").run();
-  await syncItemConversation(db, config(), 'github:201', { force: true, fetchImpl: fetchImpl({ pr: 'open', merged: true }) });
+  await syncItemConversation(db, config(), 'github:201', { force: true, fetchImpl: fetchImpl({ state: 'open', merged: true, labels: ['feature'] }) });
   pr = JSON.parse(db.prepare('SELECT data FROM items WHERE id=?').get('github:201').data);
   assert.equal(pr.state, 'open');
   assert.equal(pr.merged, true, 'a merged flag is never dropped by a reopen');

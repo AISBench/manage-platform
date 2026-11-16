@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { addAudit, listItems } from './db.js';
 import {
   fetchIssueComments, fetchPullReviews, fetchPullReviewComments, fetchIssueTimeline, fetchIssueDetail,
-  fetchPullRequestDetail, fetchPullCheckRuns, fetchCommitStatuses, createIssueComment, rerunGitHubWorkflow, identityId,
+  fetchPullRequestDetail, fetchPullCheckRuns, fetchCommitStatuses, createIssueComment, rerunGitHubWorkflow, identityId, normalizeIssue,
 } from './integrations/github.js';
 import { getGitHubToken, deleteGitHubToken, markGitHubTokenVerified } from './github-tokens.js';
 
@@ -231,19 +231,25 @@ function itemRow(db, id) {
   return item;
 }
 
-// Closing, merging or reopening on GitHub must show up as soon as the
-// conversation is synced, instead of waiting for the next full repository sync.
-function applyRemoteState(db, itemId, remote) {
+// Closing, merging, reopening, or editing labels/title on GitHub must show up as
+// soon as the conversation is synced, instead of waiting for the next full sync.
+const GITHUB_FIELDS = ['title', 'body', 'url', 'state', 'author', 'authorId', 'assignees', 'assigneeIds', 'reviewers', 'reviewerIds', 'labels', 'updatedAt', 'createdAt', 'draft', 'mergeableState', 'headSha'];
+function canonical(value) {
+  if (Array.isArray(value)) return JSON.stringify([...new Set(value)].sort());
+  return JSON.stringify(value ?? null);
+}
+function applyRemoteItem(db, itemId, remote) {
   if (!remote || !['open', 'closed'].includes(remote.state)) return false;
   const row = db.prepare('SELECT * FROM items WHERE id=?').get(itemId);
   if (!row) return false;
   let data;
   try { data = JSON.parse(row.data); } catch { return false; }
-  const merged = remote.merged === true;
-  if (data.state === remote.state && (!merged || data.merged === true)) return false;
-  const next = { ...data, state: remote.state };
-  if (merged) next.merged = true;
-  if (typeof remote.updatedAt === 'string') next.updatedAt = remote.updatedAt;
+  const next = { ...data };
+  for (const field of GITHUB_FIELDS) {
+    if (remote[field] !== undefined && canonical(remote[field]) !== canonical(next[field])) next[field] = remote[field];
+  }
+  if (remote.merged === true) next.merged = true;
+  if (canonical(next) === canonical(data)) return false;
   const reopened = data.state === 'closed' && next.state === 'open' && row.workflow === 'done';
   db.prepare('UPDATE items SET data=?,needs_review=CASE WHEN ? THEN 1 ELSE needs_review END,version=version+1 WHERE id=?')
     .run(JSON.stringify(next), Number(reopened), itemId);
@@ -275,13 +281,16 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
 
   let ciEvents = [];
   let headSha = item.headSha || null;
-  let remoteState = null;
+  let remoteItem = null;
   if (item.kind === 'pr') {
     try {
       const detail = await fetchPullRequestDetail({ repo: config.repo, number: item.number, token, fetchImpl });
-      remoteState = { state: detail.state, merged: detail.merged === true || Boolean(detail.merged_at), updatedAt: detail.updated_at };
       if (!headSha && typeof detail.head?.sha === 'string') headSha = detail.head.sha;
-    } catch { /* state and CI refresh are best-effort; conversation still syncs */ }
+      try {
+        remoteItem = normalizeIssue(detail, detail);
+        if (detail.merged === true) remoteItem.merged = true;
+      } catch { /* an unexpected payload must not break conversation sync */ }
+    } catch { /* state, labels and CI refresh are best-effort; conversation still syncs */ }
     try {
       if (headSha) {
         const [runs, statuses] = await Promise.all([
@@ -293,9 +302,8 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
     } catch { /* CI is best-effort; conversation still syncs */ }
   } else {
     try {
-      const detail = await fetchIssueDetail({ repo: config.repo, number: item.number, token, fetchImpl });
-      remoteState = { state: detail.state, updatedAt: detail.updated_at };
-    } catch { /* state refresh is best-effort; conversation still syncs */ }
+      remoteItem = normalizeIssue(await fetchIssueDetail({ repo: config.repo, number: item.number, token, fetchImpl }));
+    } catch { /* state and labels refresh are best-effort; conversation still syncs */ }
   }
 
   const full = comments.length + reviews.length + reviewComments.length < MESSAGE_LIMIT && timeline.length < EVENT_LIMIT;
@@ -314,7 +322,7 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
       db.prepare("DELETE FROM item_events WHERE item_id=? AND category='ci'").run(item.id);
       for (const event of ciEvents) upsertEvent(db, item.id, event);
     }
-    applyRemoteState(db, item.id, remoteState);
+    applyRemoteItem(db, item.id, remoteItem);
     const at = now();
     db.prepare(`INSERT INTO item_conversation_sync(item_id,messages_synced_at,events_synced_at,ci_synced_at,truncated) VALUES (?,?,?,?,?)
       ON CONFLICT(item_id) DO UPDATE SET messages_synced_at=excluded.messages_synced_at,events_synced_at=excluded.events_synced_at,ci_synced_at=excluded.ci_synced_at,truncated=excluded.truncated`)
