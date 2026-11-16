@@ -58,7 +58,7 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 | Method and route | Request / response |
 | --- | --- |
 | GET /api/dashboard | `{stats:{openIssues,openPRs,overdue,myTasks,unassigned,ownerIssues,needsReview},items,activity,lastSync,syncError}` |
-| GET /api/items | `{items}`; filters kind,state=open|closed|all,mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module |
+| GET /api/items | `{items}`; filters kind,state=open|closed|all,mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,unread,mentions |
 | PATCH /api/items/:id | `{version,workflow?,ownerMemberId?,priority?,dueAt?}` → `{item}`; related members edit local fields; owner changes require admin |
 | POST /api/items/:id/claim | `{version}` → `{item}`; active member, open/unassigned item, atomic no-steal |
 | POST /api/items/bulk-assign | Admin: `{items:[{id,version}],ownerMemberId}` → `{items}`; 1–100 unique items, all-or-nothing |

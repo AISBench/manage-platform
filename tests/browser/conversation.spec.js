@@ -28,6 +28,19 @@ test('inline review comments show the related code and link to the PR Files chan
   await expect(link).toHaveAttribute('href','https://github.com/AISBench/benchmark/pull/9000/changes#r90002');
 });
 
+test('dashboard unread and mention cards open filtered task lists',async({page})=>{
+  await page.goto('/workspace');
+  await page.getByRole('button',{name:/未读消息/}).click();
+  await expect(page.getByRole('heading',{name:'全部任务',exact:true})).toBeVisible();
+  await expect(page.getByLabel('责任与复核筛选')).toHaveValue('unread');
+  await expect(page.getByLabel('GitHub 状态')).toHaveValue('all');
+  await expect(page.locator('.row-unread').first()).toBeVisible();
+  await page.goto('/workspace');
+  await page.getByRole('button',{name:/@我/}).click();
+  await expect(page.getByLabel('责任与复核筛选')).toHaveValue('mentions');
+  await expect(page.locator('.row-unread.mention').first()).toBeVisible();
+});
+
 test('detail page shows the original GitHub description',async({page})=>{
   await page.goto('/workspace/items/github%3A9000');
   const card=page.locator('.description-card');
