@@ -67,6 +67,19 @@ test('item search returns lightweight references for the # picker', async t => {
   assert.equal((await f.client(null).request('/api/items/search?q=9000')).status, 401);
 });
 
+test('item list can filter to unread and mention items', async t => {
+  const f = await httpFixture(t, { config: { demo: true } });
+  const c = f.client('demo-admin');
+  const all = await c.request('/api/items?state=open');
+  const unread = await c.request('/api/items?state=open&unread=true');
+  const mentions = await c.request('/api/items?state=open&mentions=true');
+  assert.ok(unread.data.items.length > 0);
+  assert.ok(unread.data.items.every(item => item.unreadCount > 0));
+  assert.ok(mentions.data.items.length > 0);
+  assert.ok(mentions.data.items.every(item => item.mentionCount > 0));
+  assert.ok(unread.data.items.length <= all.data.items.length);
+});
+
 test('demo member can send a local conversation message without GitHub', async t => {
   const f = await httpFixture(t, { config: { demo: true } });
   const c = f.client('demo-admin');
