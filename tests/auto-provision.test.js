@@ -55,6 +55,22 @@ test('first GitHub login creates an active member and reuses it on later logins'
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM members WHERE github_user_id='501'").get().n, 1);
 });
 
+test('OAuth callback reports GitHub connectivity failures with an actionable message', async t => {
+  const secret = 'ECONNREFUSED-internal-host';
+  const fetchImpl = async url => {
+    if (String(url).includes('access_token')) throw new Error(secret);
+    return new Response(JSON.stringify(profile()), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const f = await httpFixture(t, { fetchImpl, config: { tokenEncryptionKey: key } });
+  const anonymous = f.client(null);
+  const start = await anonymous.request('/auth/github');
+  const state = new URL(start.response.headers.get('location')).searchParams.get('state');
+  const callback = await anonymous.request(`/auth/github/callback?state=${state}&code=test-code`);
+  assert.equal(callback.status, 502);
+  assert.match(callback.data.error, /网络或代理/);
+  assert.ok(!JSON.stringify(callback.data).includes(secret));
+});
+
 test('login still succeeds but reports missing write storage when TOKEN_ENCRYPTION_KEY is absent', async t => {
   const f = await setup(t, profile(), { tokenEncryptionKey: '' });
   const callback = await f.oauth();

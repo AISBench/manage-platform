@@ -162,9 +162,21 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const oauth=consumeOAuthState(db,req,res,'github',config);
     let context={};try {context=JSON.parse(oauth.user_id || '{}');} catch { /* legacy state has no navigation context */ }
     if(typeof req.query.code!=='string') throw fail(400,'GitHub 授权未完成');
-    const {data:token}=await requestJson('https://github.com/login/oauth/access_token',{fetchImpl,method:'POST',headers:{Accept:'application/json','Content-Type':'application/json'},body:JSON.stringify({client_id:config.githubClientId,client_secret:config.githubClientSecret,code:req.query.code,redirect_uri:`${config.baseUrl}/auth/github/callback`}),label:'GitHub OAuth'});
+    let token;
+    try {
+      ({data:token}=await requestJson('https://github.com/login/oauth/access_token',{fetchImpl,method:'POST',headers:{Accept:'application/json','Content-Type':'application/json'},body:JSON.stringify({client_id:config.githubClientId,client_secret:config.githubClientSecret,code:req.query.code,redirect_uri:`${config.baseUrl}/auth/github/callback`}),label:'GitHub OAuth'}));
+    } catch (error) {
+      console.warn(`[${req.requestId}] GitHub OAuth token exchange failed (${error.name || 'Error'}${error.status ? ` ${error.status}` : ''})`);
+      throw Object.assign(fail(502,'无法连接 GitHub 完成授权，请检查服务器到 github.com 的网络或代理后重试'),{code:'GITHUB_OAUTH_UNAVAILABLE'});
+    }
     if(typeof token.access_token!=='string') throw fail(502,'GitHub 登录换取授权失败');
-    const {data:profile}=await requestJson('https://api.github.com/user',{fetchImpl,headers:{Authorization:`Bearer ${token.access_token}`,Accept:'application/vnd.github+json','User-Agent':'aisbench-triage','X-GitHub-Api-Version':'2022-11-28'},label:'GitHub identity'});
+    let profile;
+    try {
+      ({data:profile}=await requestJson('https://api.github.com/user',{fetchImpl,headers:{Authorization:`Bearer ${token.access_token}`,Accept:'application/vnd.github+json','User-Agent':'aisbench-triage','X-GitHub-Api-Version':'2022-11-28'},label:'GitHub identity'}));
+    } catch (error) {
+      console.warn(`[${req.requestId}] GitHub OAuth profile request failed (${error.name || 'Error'}${error.status ? ` ${error.status}` : ''})`);
+      throw Object.assign(fail(502,'无法读取 GitHub 账号信息，请检查服务器到 github.com 的网络或代理后重试'),{code:'GITHUB_OAUTH_UNAVAILABLE'});
+    }
     const githubId=identityId(profile.id);if(!githubId||typeof profile.login!=='string'||profile.type!=='User') throw fail(502,'无效 GitHub 个人身份');
     const member=db.prepare('SELECT status FROM members WHERE github_user_id=?').get(githubId);
     if(member?.status==='disabled') throw fail(403,'该成员已停用，请联系管理员');
@@ -364,7 +376,9 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     if(res.headersSent) return;
     if(error instanceof z.ZodError) return res.status(400).json({error:'输入参数不合法，请检查字段格式和范围'});
     const status=error.status>=400&&error.status<600?error.status:502;
-    res.status(status).json({error:status<500?error.message:'外部服务或平台请求失败，请检查配置与连接',requestId:_req.requestId});
+    if(status>=500) console.error(`[${_req.requestId}] ${_req.method} ${_req.path} failed: ${error.name || 'Error'}${error.status ? ` status=${error.status}` : ''}${error.code ? ` code=${error.code}` : ''}`);
+    const safe=status<500||error.code==='GITHUB_OAUTH_UNAVAILABLE';
+    res.status(status).json({error:safe?error.message:'外部服务或平台请求失败，请检查配置与连接',requestId:_req.requestId});
   });
   return {app,db,services};
 }
