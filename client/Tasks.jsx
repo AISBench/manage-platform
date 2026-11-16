@@ -12,9 +12,11 @@ export function TaskTable({ items, onOpen, compact, selected, onSelect, emptyTex
 }
 export default function TasksScreen({ mine, revision, onOpen, onSync, syncing, user, initialFocus = '', onChanged, notify }) {
   const [query, setQuery] = useState(''); const q = useDebounce(query);
-  const [kind, setKind] = useState(''); const [state, setState] = useState('open'); const [workflow, setWorkflow] = useState(''); const [priority, setPriority] = useState('');
+  const [kind, setKind] = useState(''); const [state, setState] = useState(['unread', 'mentions'].includes(initialFocus) ? 'all' : 'open'); const [workflow, setWorkflow] = useState(''); const [priority, setPriority] = useState('');
   const [focus, setFocus] = useState(initialFocus); const [module, setModule] = useState(''); const moduleQuery = useDebounce(module); const [owner, setOwner] = useState(''); const [history, setHistory] = useState(false);
   const [selected, setSelected] = useState(new Set()); const [bulkOpen, setBulkOpen] = useState(false); const [localRevision, setRevision] = useState(0);
+  // Unread/mention counts include closed items, so these focuses must not be limited to open tasks.
+  useEffect(() => { if (focus === 'unread' || focus === 'mentions') setState('all'); }, [focus]);
   const params = new URLSearchParams({ state }); if (mine) params.set('mine', 'true'); if (q.trim()) params.set('q', q.trim()); if (kind) params.set('kind', kind); if (moduleQuery.trim()) params.set('module', moduleQuery.trim()); if (owner) params.set('ownerMemberId', owner);
   if (focus === 'unassigned') params.set('unassigned', 'true'); if (focus === 'ownerIssue') params.set('ownerIssue', 'true'); if (focus === 'needsReview') params.set('needsReview', 'true');
   if (focus === 'unread') params.set('unread', 'true'); if (focus === 'mentions') params.set('mentions', 'true');

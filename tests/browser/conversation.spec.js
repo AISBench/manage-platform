@@ -33,6 +33,7 @@ test('dashboard unread and mention cards open filtered task lists',async({page})
   await page.getByRole('button',{name:/未读消息/}).click();
   await expect(page.getByRole('heading',{name:'全部任务',exact:true})).toBeVisible();
   await expect(page.getByLabel('责任与复核筛选')).toHaveValue('unread');
+  await expect(page.getByLabel('GitHub 状态')).toHaveValue('all');
   await expect(page.locator('.row-unread').first()).toBeVisible();
   await page.goto('/workspace');
   await page.getByRole('button',{name:/@我/}).click();
