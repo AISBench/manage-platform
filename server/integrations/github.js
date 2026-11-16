@@ -222,6 +222,12 @@ export async function fetchIssueTimeline({ repo, number, token, fetchImpl = fetc
   const { base, request } = reader(repo, token, fetchImpl);
   return paginate(`${base}/issues/${issueNumber(number)}/timeline?per_page=100&page=1`, request, data => data);
 }
+export async function fetchIssueDetail({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  const { data } = await request(`${base}/issues/${issueNumber(number)}`);
+  if (!data || data.number !== number || !['open', 'closed'].includes(data.state)) throw new IntegrationError('GitHub returned invalid issue data');
+  return data;
+}
 export async function fetchPullRequestDetail({ repo, number, token, fetchImpl = fetch }) {
   const { base, request } = reader(repo, token, fetchImpl);
   const { data } = await request(`${base}/pulls/${issueNumber(number)}`);
