@@ -30,7 +30,7 @@ export function openDatabase(filename) {
     try {
       db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 7)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 8)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -196,6 +196,22 @@ export function openDatabase(filename) {
           updated_at TEXT NOT NULL);`);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(7, new Date().toISOString());
       }
+      if (!applied.has(8)) {
+        // Personal Feishu/Lark custom-bot webhooks are a tenant-independent
+        // notification channel. Only the encrypted URL is stored; the host is
+        // kept in clear text so the UI can show which platform it belongs to.
+        db.exec(`CREATE TABLE IF NOT EXISTS feishu_webhooks (
+          member_id TEXT PRIMARY KEY REFERENCES members(id),
+          host TEXT NOT NULL,
+          encrypted_url TEXT NOT NULL,
+          url_iv TEXT NOT NULL,
+          url_tag TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'needs_confirmation' CHECK(status IN ('active','needs_confirmation')),
+          binding_version INTEGER NOT NULL DEFAULT 1 CHECK(binding_version>=1),
+          bound_at TEXT NOT NULL,
+          verified_at TEXT);`);
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(8, new Date().toISOString());
+      }
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));
       db.exec('COMMIT');
@@ -250,15 +266,21 @@ export function listItems(db, now = Date.now(), appId = '') {
   const rules = getSetting(db, 'rules', { staleHours: 48 });
   return db.prepare(`SELECT i.*,m.github_login AS owner_login,m.display_name AS owner_display_name,m.status AS owner_status,m.module AS owner_module,
     u.name AS owner_profile_name,u.notifications_enabled AS owner_notifications_enabled,
-    b.member_id AS binding_id,b.app_id AS binding_app_id,b.status AS binding_status,b.verified_at AS binding_verified_at
+    b.member_id AS binding_id,b.app_id AS binding_app_id,b.status AS binding_status,b.verified_at AS binding_verified_at,
+    w.member_id AS webhook_id,w.status AS webhook_status,w.verified_at AS webhook_verified_at
     FROM items i LEFT JOIN members m ON m.id=i.owner_member_id LEFT JOIN users u ON u.member_id=m.id
-    LEFT JOIN feishu_bindings b ON b.member_id=m.id ORDER BY i.number DESC`).all().map(row => serializeItem(row, rules, now, {
-      ownerLogin: row.owner_login, ownerName: row.owner_display_name || row.owner_profile_name || row.owner_login,
-      ownerStatus: row.owner_status, module: row.owner_module,
-      feishuBound: !!row.binding_id && row.binding_app_id === appId,
-      feishuVerified: row.binding_app_id === appId && row.binding_status === 'active' && !!row.binding_verified_at,
-      notificationsEnabled: !!row.owner_notifications_enabled,
-    }));
+    LEFT JOIN feishu_bindings b ON b.member_id=m.id LEFT JOIN feishu_webhooks w ON w.member_id=m.id
+    ORDER BY i.number DESC`).all().map(row => {
+      const oauthBound = !!row.binding_id && row.binding_app_id === appId;
+      const webhookBound = !!row.webhook_id;
+      return serializeItem(row, rules, now, {
+        ownerLogin: row.owner_login, ownerName: row.owner_display_name || row.owner_profile_name || row.owner_login,
+        ownerStatus: row.owner_status, module: row.owner_module,
+        feishuBound: oauthBound || webhookBound,
+        feishuVerified: (oauthBound && row.binding_status === 'active' && !!row.binding_verified_at) || (webhookBound && row.webhook_status === 'active' && !!row.webhook_verified_at),
+        notificationsEnabled: !!row.owner_notifications_enabled,
+      });
+    });
 }
 
 export function seedDemo(db, repo) {

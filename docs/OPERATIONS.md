@@ -57,8 +57,8 @@ HTTPS 可参考 [宿主机 Caddy 样例](../deploy/Caddyfile.example)。Caddy �
 2. OAuth scope 使用 `read:user public_repo`（私有仓库用 `repo`），并配置 `TOKEN_ENCRYPTION_KEY`；成员在设置页确认"评论写权限已授权"。
 3. 仓库同步使用只读服务器凭证；先手动同步，核对开放 / 关闭事务与 PR CI。
 4. Webhook 回调为 `BASE_URL/api/webhooks/github`，配置随机 secret，订阅 Issues / Issue comments / Pull requests / Pull request reviews / Pull request review comments；需要实时 CI 时增加 Check runs、Check suites、Workflow runs。观察 GitHub 投递与平台收件箱，验签失败必须拒绝。
-5. 飞书自建应用发布、机器人和个人消息权限完成审批、测试成员纳入应用范围；回调为 `BASE_URL/auth/feishu/callback`。
-6. 成员本人绑定后发送测试消息。界面变为已验证、本人实际收到消息，才算通知通道验收成功。
+5. 飞书提醒通道二选一：推荐成员在个人设置配置自己的飞书/Lark 自定义机器人 Webhook（跨租户）；或发布企业自建应用、完成机器人和个人消息权限审批、把成员纳入应用范围，回调为 `BASE_URL/auth/feishu/callback`。
+6. 成员本人保存绑定后发送测试消息。界面变为已验证、本人实际收到消息，才算通知通道验收成功。已有个人机器人时优先使用该通道，不再依赖企业应用。
 7. 确认初次同步不发送历史事件消息，规则仍默认关闭。
 8. 执行备份及隔离恢复演练，再由管理员启用提醒，先小范围试运行。
 
@@ -106,6 +106,8 @@ docker compose exec platform node server/cli.js backup --output /app/data/backup
 | 成员 GitHub 登录后被拒绝 | 数据库中是否预录入正确固定 ID、是否停用；运行时修改环境白名单无效 |
 | 无法停用 / 降级管理员 | 是否最后一位正常且已激活管理员；待激活管理员不能作为兜底 |
 | 成员无法接收飞书 | 是否本人绑定当前 App ID、是否测试确认、通知开关 / 免打扰、成员状态、应用发布 / 可用范围 / 权限 |
+| 个人机器人保存失败 | Webhook 是否为 `https://open.feishu.cn` 或 `https://open.larksuite.com` 的 `/open-apis/bot/v2/hook/...` 地址；服务端是否配置 `TOKEN_ENCRYPTION_KEY`；是否因成员停用或替换地址导致绑定版本变化 |
+| 个人机器人测试消息未到达 | 机器人是否仍在群内、地址是否被重置、群是否限制了机器人发言；重新保存并测试，管理员只能看到主机和状态，不能读取完整地址 |
 | 提示未授权 GitHub 评论写权限，或授权后仍回到工作区 | 服务端是否配置 32 字节 base64 的 `TOKEN_ENCRYPTION_KEY`，或 `DATA_DIR/token-encryption.key` 是否可读写；启动日志是否有对应警告；`GITHUB_OAUTH_SCOPE` 是否含 `public_repo`（私有仓库用 `repo`）；修改 scope 后需撤销授权并重新登录 |
 | 已启用成员仍不可达 | 停用保留关联但撤销验证，需要本人重新测试；换 App ID 需要重新绑定 |
 | 绑定或测试冲突 | 期间发生解绑、重绑、会话切换或停用；旧操作被拒绝是保护机制，重新发起当前操作 |
