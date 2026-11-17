@@ -9,7 +9,8 @@ import { openDatabase, seedDemo, listItems, getSetting, setSetting, addActivity,
 import { authMiddleware, requireUser, requireAdmin, csrfGuard, newOAuthState, consumeOAuthState, createSession, cookies, hashToken, sessionUser } from './auth.js';
 import { createServices, isParticipant } from './services.js';
 import { verifyGitHubSignature, identityId } from './integrations/github.js';
-import { exchangeFeishuCode, feishuAuthorizeUrl, sendFeishuMessage } from './integrations/feishu.js';
+import { exchangeFeishuCode, feishuAuthorizeUrl, sendFeishuMessage, sendFeishuWebhookMessage } from './integrations/feishu.js';
+import { deleteWebhook, decryptWebhookUrl, getWebhook, saveWebhook, webhookView } from './feishu-webhooks.js';
 import { requestJson } from './integrations/http.js';
 import { autoProvisionMemberInTransaction, githubAvatar, getMemberView, listMemberViews, updateMember, setMemberStatus } from './members.js';
 import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
@@ -136,7 +137,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
     const policy=getAccessPolicy(db);
-    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuOAuthConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuWebhookConfigured:!!config.tokenEncryptionKey&&!config.demo,repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
@@ -369,6 +370,45 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     transact(()=>{fresh(req);const updated=db.prepare("UPDATE feishu_bindings SET status='active',verified_at=? WHERE member_id=? AND binding_version=? AND app_id=? AND open_id=?").run(iso(),req.member.id,binding.binding_version,config.feishuAppId,binding.open_id);if(!updated.changes) throw fail(409,'绑定已变更，测试结果不能激活旧绑定');audit(req,'feishu.verify','member',req.member.id,null,{verified:true});});
     res.json({sent:true,demo:false,user:sessionUser(db,req.member.id,config)});
   });
+  app.put('/api/feishu/webhook',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`feishu-webhook:${req.member.id}`}),(req,res)=>{
+    if(config.demo) throw fail(400,'演示模式不连接真实飞书');
+    const body=z.object({url:z.string().min(1).max(2048)}).strict().parse(req.body);
+    const user=transact(()=>{
+      fresh(req);
+      const version=nextBindingEpoch(req.member.id);
+      const {host}=saveWebhook(db,req.member.id,body.url,config,version);
+      db.prepare("UPDATE notifications SET status='cancelled',error_code='BINDING_CHANGED' WHERE recipient_member_id=? AND status IN ('pending','sending')").run(req.member.id);
+      addAudit(db,{actorId:req.member.id,action:'feishu.webhook_bind',targetType:'member',targetId:req.member.id,after:{host},requestId:req.requestId});
+      return sessionUser(db,req.member.id,config);
+    });
+    res.json({webhook:webhookView(db,req.member.id),user});
+  });
+  app.delete('/api/feishu/webhook',(req,res)=>{
+    const user=transact(()=>{
+      fresh(req);
+      nextBindingEpoch(req.member.id);
+      deleteWebhook(db,req.member.id);
+      db.prepare("UPDATE notifications SET status='cancelled',error_code='UNBOUND' WHERE recipient_member_id=? AND status IN ('pending','sending')").run(req.member.id);
+      audit(req,'feishu.webhook_unbind','member',req.member.id,null,{bound:false});
+      return sessionUser(db,req.member.id,config);
+    });
+    res.json({ok:true,webhook:webhookView(db,req.member.id),user});
+  });
+  app.post('/api/feishu/webhook/test',rateLimit({windowMs:60000,limit:3,keyGenerator:req=>`feishu-webhook-test:${req.member.id}`}),async(req,res)=>{
+    if(config.demo) return res.json({sent:false,demo:true});
+    const webhook=getWebhook(db,req.member.id);
+    if(!webhook) throw fail(400,'请先配置个人飞书机器人');
+    const webhookUrl=decryptWebhookUrl(webhook,config);
+    if(!webhookUrl) throw fail(503,'个人机器人地址无法解密，请重新配置');
+    await (integrations.sendWebhook || sendFeishuWebhookMessage)({webhookUrl,title:'AISBench 个人提醒已连接',text:'这是一条由你主动发起的测试消息。',url:config.baseUrl});
+    transact(()=>{
+      fresh(req);
+      const updated=db.prepare("UPDATE feishu_webhooks SET status='active',verified_at=? WHERE member_id=? AND binding_version=?").run(iso(),req.member.id,webhook.binding_version);
+      if(!updated.changes) throw fail(409,'绑定已变更，测试结果不能激活旧绑定');
+      audit(req,'feishu.webhook_verify','member',req.member.id,null,{verified:true});
+    });
+    res.json({sent:true,demo:false,channel:'webhook',user:sessionUser(db,req.member.id,config)});
+  });
   app.get('/api/admin/audit-logs',requireAdmin,(req,res)=>{
     const {page,pageSize}=pagination(req.query),action=typeof req.query.action==='string'?req.query.action:'';
     const filter=action?' WHERE a.action=?':'',args=action?[action]:[];
@@ -379,7 +419,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.get('/api/admin/integration-status',requireAdmin,(_req,res)=>{
     const counts=table=>Object.fromEntries(db.prepare(`SELECT status,COUNT(*) AS n FROM ${table} GROUP BY status`).all().map(r=>[r.status,r.n]));
     const wc=counts('webhook_inbox'),nc=counts('notifications'),mc=counts('members');
-    res.json({demo:config.demo,repo:config.repo,lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError'),nextSyncAllowedAt:getSetting(db,'nextSyncAllowedAt'),githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),syncIntervalMinutes:config.syncIntervalMs/60000,webhookIntervalSeconds:15,webhook:{pending:wc.pending||0,done:wc.done||0,oldestPendingAt:db.prepare("SELECT MIN(received_at) AS at FROM webhook_inbox WHERE status='pending'").get().at},notifications:{...Object.fromEntries(['pending','sending','sent','failed','skipped','cancelled'].map(k=>[k,nc[k]||0])),oldestPendingAt:db.prepare("SELECT MIN(created_at) AS at FROM notifications WHERE status='pending'").get().at},membership:{active:mc.active||0,pending:mc.pending_activation||0,disabled:mc.disabled||0},schemaVersion:db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version});
+    res.json({demo:config.demo,repo:config.repo,lastSync:getSetting(db,'lastSync'),syncError:getSetting(db,'syncError'),nextSyncAllowedAt:getSetting(db,'nextSyncAllowedAt'),githubConfigured:!!config.githubClientId,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuWebhookConfigured:!!config.tokenEncryptionKey&&!config.demo,syncIntervalMinutes:config.syncIntervalMs/60000,webhookIntervalSeconds:15,webhook:{pending:wc.pending||0,done:wc.done||0,oldestPendingAt:db.prepare("SELECT MIN(received_at) AS at FROM webhook_inbox WHERE status='pending'").get().at},notifications:{...Object.fromEntries(['pending','sending','sent','failed','skipped','cancelled'].map(k=>[k,nc[k]||0])),oldestPendingAt:db.prepare("SELECT MIN(created_at) AS at FROM notifications WHERE status='pending'").get().at},membership:{active:mc.active||0,pending:mc.pending_activation||0,disabled:mc.disabled||0},schemaVersion:db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version});
   });
   app.post('/api/admin/webhooks/:id/retry',requireAdmin,(req,res)=>{
     fresh(req,true);const job=db.prepare('SELECT status FROM webhook_inbox WHERE id=?').get(req.params.id);if(!job) throw fail(404,'事件不存在');if(job.status==='done') throw fail(409,'已完成事件不能重复执行');

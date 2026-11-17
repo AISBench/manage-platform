@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { listItems, getSetting, setSetting, addActivity, addAudit } from './db.js';
 import { fetchRepositoryItems, fetchRepositoryLabels, identityId } from './integrations/github.js';
-import { sendFeishuMessage } from './integrations/feishu.js';
+import { sendFeishuMessage, sendFeishuWebhookMessage } from './integrations/feishu.js';
+import { decryptWebhookUrl } from './feishu-webhooks.js';
 import { createPublicService } from './public-service.js';
 import { syncConversationBatch, upsertFromWebhook } from './conversation.js';
 import { syncRepositoryLabels } from './labels.js';
@@ -24,6 +25,7 @@ export function isParticipant(item,identity) {
 const nowISO=()=>new Date().toISOString();
 export function createServices(db,config,integrations={}) {
   const fetchItems=integrations.fetchItems || fetchRepositoryItems, sendMessage=integrations.sendMessage || sendFeishuMessage;
+  const sendWebhook=integrations.sendWebhook || sendFeishuWebhookMessage;
   const publicPortal=createPublicService(db,config,integrations);
   let syncPromise=null,reminderPromise=null,webhookPromise=null;
   const items=()=>listItems(db,Date.now(),config.feishuAppId || '');
@@ -38,21 +40,26 @@ export function createServices(db,config,integrations={}) {
   }
   function deliveryContext(member) {
     const user=db.prepare('SELECT * FROM users WHERE member_id=?').get(member.id);
+    const webhook=db.prepare('SELECT * FROM feishu_webhooks WHERE member_id=?').get(member.id);
     const binding=db.prepare('SELECT * FROM feishu_bindings WHERE member_id=?').get(member.id);
-    let errorCode=null;
+    let errorCode=null,channel=null,bindingVersion=null;
     if (member.status==='disabled') errorCode='MEMBER_DISABLED';
     else if (member.status!=='active') errorCode='MEMBER_PENDING';
-    else if (!binding) errorCode='UNBOUND';
-    else if (binding.app_id!==config.feishuAppId) errorCode='APP_MISMATCH';
-    else if (binding.status!=='active'||!binding.verified_at) errorCode='BINDING_CONFIRMATION';
-    else if (!user?.notifications_enabled) errorCode='NOTIFICATIONS_DISABLED';
-    return {user,binding,errorCode};
+    // A verified personal webhook is tenant-independent and takes precedence.
+    else if (webhook?.status==='active'&&webhook.verified_at) {channel='webhook';bindingVersion=webhook.binding_version;}
+    else if (binding?.app_id===config.feishuAppId&&binding.status==='active'&&binding.verified_at) {channel='oauth';bindingVersion=binding.binding_version;}
+    else if (!webhook&&!binding) errorCode='UNBOUND';
+    else if (webhook&&(webhook.status!=='active'||!webhook.verified_at)) errorCode='WEBHOOK_CONFIRMATION';
+    else if (binding&&binding.app_id!==config.feishuAppId) errorCode='APP_MISMATCH';
+    else errorCode='BINDING_CONFIRMATION';
+    if (!errorCode&&!user?.notifications_enabled) errorCode='NOTIFICATIONS_DISABLED';
+    return {user,webhook,binding,channel,bindingVersion,errorCode};
   }
   function enqueue(item,member,reason,key) {
     if (member?.status==='disabled') return 0;
     const context=member?deliveryContext(member):{errorCode:'NO_ACTIVE_ADMIN'};
-    const unreachable={MEMBER_PENDING:'成员尚未首次登录',UNBOUND:'成员尚未绑定飞书',APP_MISMATCH:'飞书应用已更换，请重新绑定',BINDING_CONFIRMATION:'飞书绑定待本人确认并测试',NOTIFICATIONS_DISABLED:'成员已关闭通知',NO_ACTIVE_ADMIN:'没有可用的管理员接收提醒'};
-    return Number(db.prepare('INSERT OR IGNORE INTO notifications(id,dedupe_key,item_id,recipient,recipient_member_id,binding_version,title,reason,status,created_at,error_code,error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(),key,item.id,member?.github_login || '(unrouted)',member?.id || null,context.binding?.binding_version || null,`${item.kind==='pr'?'PR':'Issue'} #${item.number} · ${item.title}`.slice(0,300),reason,context.errorCode?'skipped':'pending',nowISO(),context.errorCode,context.errorCode?unreachable[context.errorCode] || '接收人不可达':null).changes);
+    const unreachable={MEMBER_PENDING:'成员尚未首次登录',UNBOUND:'成员尚未绑定飞书',APP_MISMATCH:'飞书应用已更换，请重新绑定',BINDING_CONFIRMATION:'飞书绑定待本人确认并测试',WEBHOOK_CONFIRMATION:'飞书个人机器人待发送测试确认',NOTIFICATIONS_DISABLED:'成员已关闭通知',NO_ACTIVE_ADMIN:'没有可用的管理员接收提醒'};
+    return Number(db.prepare('INSERT OR IGNORE INTO notifications(id,dedupe_key,item_id,recipient,recipient_member_id,binding_version,title,reason,status,created_at,error_code,error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(),key,item.id,member?.github_login || '(unrouted)',member?.id || null,context.bindingVersion || null,`${item.kind==='pr'?'PR':'Issue'} #${item.number} · ${item.title}`.slice(0,300),reason,context.errorCode?'skipped':'pending',nowISO(),context.errorCode,context.errorCode?unreachable[context.errorCode] || '接收人不可达':null).changes);
   }
   async function syncInner() {
     if (config.demo) {publicPortal.demoProjection();return {count:items().length,lastSync:getSetting(db,'lastSync')};}
@@ -113,14 +120,21 @@ export function createServices(db,config,integrations={}) {
       // item/owner/rules snapshot for the next recipient.
       const item=items().find(i=>i.id===notice.item_id),member=notice.recipient_member_id&&db.prepare('SELECT * FROM members WHERE id=?').get(notice.recipient_member_id);
       const context=member?deliveryContext(member):{errorCode:'MEMBER_MISSING'};
-      if(!item||item.state!=='open'||item.workflow==='done'||!member||context.errorCode||!recipients(item).some(m=>m.id===member.id)||context.binding?.binding_version!==notice.binding_version||(notice.reason==='超期或长时间未更新'&&!item.overdue)) {
+      if(!item||item.state!=='open'||item.workflow==='done'||!member||context.errorCode||!recipients(item).some(m=>m.id===member.id)||context.bindingVersion!==notice.binding_version||(notice.reason==='超期或长时间未更新'&&!item.overdue)) {
         db.prepare("UPDATE notifications SET status='cancelled',error_code=? WHERE id=?").run(context.errorCode || 'NO_LONGER_RELEVANT',notice.id);result.skipped++;continue;
       }
       if(isQuietTime(context.user.quiet_start,context.user.quiet_end)) {db.prepare('UPDATE notifications SET next_at=? WHERE id=?').run(quietEndAt(context.user.quiet_end),notice.id);result.skipped++;continue;}
       if(!db.prepare("UPDATE notifications SET status='sending',attempts=attempts+1 WHERE id=? AND status='pending'").run(notice.id).changes) continue;
       try {
         const platformUrl=`${config.baseUrl}/workspace?item=${encodeURIComponent(item.id)}`;
-        await sendMessage({appId:config.feishuAppId,appSecret:config.feishuAppSecret,openId:context.binding.open_id,title:notice.title,text:`${notice.reason}\n仓库：${config.repo}\n负责人：${item.owner || '待分派'}${item.dueAt?'\n截止时间：'+item.dueAt:''}\n平台处理：${platformUrl}\nGitHub：${item.url}\n平台工作流不会修改 GitHub 状态。`,url:item.url,uuid:notice.id});
+        const message={title:notice.title,text:`${notice.reason}\n仓库：${config.repo}\n负责人：${item.owner || '待分派'}${item.dueAt?'\n截止时间：'+item.dueAt:''}\n平台处理：${platformUrl}\nGitHub：${item.url}\n平台工作流不会修改 GitHub 状态。`,url:item.url};
+        if(context.channel==='webhook') {
+          const webhookUrl=decryptWebhookUrl(context.webhook,config);
+          if(!webhookUrl) throw Object.assign(new Error('飞书个人机器人地址不可解密，请重新绑定'),{permanent:true,code:'WEBHOOK_UNREADABLE'});
+          await sendWebhook({webhookUrl,...message});
+        } else {
+          await sendMessage({appId:config.feishuAppId,appSecret:config.feishuAppSecret,openId:context.binding.open_id,...message,uuid:notice.id});
+        }
         const completed=db.prepare("UPDATE notifications SET status='sent',sent_at=?,error=NULL,error_code=NULL WHERE id=? AND status='sending'").run(nowISO(),notice.id);
         if(!completed.changes) {
           db.prepare("UPDATE notifications SET sent_at=?,error_code='DELIVERED_AFTER_REVOCATION',error='飞书已接受发送，但发送期间权限或绑定被撤销；详见审计' WHERE id=?").run(nowISO(),notice.id);

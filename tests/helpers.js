@@ -3,6 +3,7 @@ import { createApp } from '../server/app.js';
 import { createSession } from '../server/auth.js';
 import { loadConfig } from '../server/config.js';
 import { autoProvisionMemberInTransaction } from '../server/members.js';
+import { saveWebhook } from '../server/feishu-webhooks.js';
 
 export const configForTests=overrides=>({...loadConfig({DEMO_MODE:'true'}),demo:false,githubClientId:'test-id',githubClientSecret:'test-secret',feishuAppId:'cli_test',feishuAppSecret:'test-secret',...overrides});
 export function addTestMember(db,{githubId='501',login='alice',role='member',status='active',memberId}={}) {
@@ -14,6 +15,11 @@ export function addTestMember(db,{githubId='501',login='alice',role='member',sta
 }
 export function bindTestMember(db,memberId,appId='cli_test',openId=`ou_${memberId}`) {
   db.prepare("INSERT INTO feishu_bindings(member_id,app_id,open_id,status,bound_at,verified_at) VALUES (?,?,?,'active',?,?) ON CONFLICT(member_id) DO UPDATE SET app_id=excluded.app_id,open_id=excluded.open_id,status='active',verified_at=excluded.verified_at").run(memberId,appId,openId,new Date().toISOString(),new Date().toISOString());
+}
+export function bindTestWebhook(db,memberId,config,url='https://open.feishu.cn/open-apis/bot/v2/hook/test-member',{verified=true,version=1}={}) {
+  saveWebhook(db,memberId,url,config,version);
+  if(verified) db.prepare("UPDATE feishu_webhooks SET status='active',verified_at=? WHERE member_id=?").run(new Date().toISOString(),memberId);
+  return db.prepare('SELECT * FROM feishu_webhooks WHERE member_id=?').get(memberId);
 }
 export function serviceDb() {
   const db=openDatabase(':memory:');seedDemo(db,'AISBench/benchmark');

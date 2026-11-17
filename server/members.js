@@ -49,6 +49,7 @@ function revokeMemberAccess(db, id) {
   deleteGitHubToken(db, id);
   db.prepare("UPDATE notifications SET status='cancelled',error_code='member_disabled',error=NULL WHERE recipient_member_id=? AND status IN ('pending','sending')").run(id);
   db.prepare("UPDATE feishu_bindings SET status='needs_confirmation',verified_at=NULL,binding_version=binding_version+1 WHERE member_id=?").run(id);
+  db.prepare("UPDATE feishu_webhooks SET status='needs_confirmation',verified_at=NULL,binding_version=binding_version+1 WHERE member_id=?").run(id);
 }
 
 export async function resolveGitHubUser({ login, token = '', fetchImpl = fetch }) {
@@ -79,15 +80,23 @@ export async function resolveGitHubUser({ login, token = '', fetchImpl = fetch }
 
 export function getMemberView(db, id, { appId = '', includeNotes = true } = {}) {
   const row = db.prepare(`SELECT m.*,u.name AS profile_name,u.avatar_url AS profile_avatar_url,u.notifications_enabled,
-    b.app_id,b.status AS binding_status,b.bound_at,b.verified_at,b.member_id AS binding_id
-    FROM members m LEFT JOIN users u ON u.member_id=m.id LEFT JOIN feishu_bindings b ON b.member_id=m.id WHERE m.id=?`).get(id);
+    b.app_id,b.status AS binding_status,b.bound_at,b.verified_at,b.member_id AS binding_id,
+    w.member_id AS webhook_id,w.status AS webhook_status,w.verified_at AS webhook_verified_at,w.host AS webhook_host,w.bound_at AS webhook_bound_at
+    FROM members m LEFT JOIN users u ON u.member_id=m.id LEFT JOIN feishu_bindings b ON b.member_id=m.id
+    LEFT JOIN feishu_webhooks w ON w.member_id=m.id WHERE m.id=?`).get(id);
   if (!row) return null;
-  const feishuBound = !!row.binding_id && row.app_id === appId;
-  const feishuVerified = feishuBound && row.binding_status === 'active' && !!row.verified_at;
+  const feishuOAuthBound = !!row.binding_id && row.app_id === appId;
+  const feishuOAuthVerified = feishuOAuthBound && row.binding_status === 'active' && !!row.verified_at;
+  const feishuWebhookBound = !!row.webhook_id;
+  const feishuWebhookVerified = feishuWebhookBound && row.webhook_status === 'active' && !!row.webhook_verified_at;
+  const feishuBound = feishuWebhookBound || feishuOAuthBound;
+  const feishuVerified = feishuWebhookVerified || feishuOAuthVerified;
+  const notificationChannel = feishuWebhookVerified ? 'webhook' : feishuOAuthVerified ? 'oauth' : null;
   return { id: row.id, githubId: row.github_user_id, login: row.github_login, name: row.profile_name || row.github_login,
     displayName: row.display_name, avatarUrl: row.avatar_url || row.profile_avatar_url || '', module: row.module, ...(includeNotes ? { notes: row.notes } : {}),
     role: row.role, status: row.status, version: row.version, firstLoginAt: row.first_login_at, lastLoginAt: row.last_login_at,
     createdAt: row.created_at, updatedAt: row.updated_at, feishuBound, feishuVerified,
+    feishuOAuthBound, feishuOAuthVerified, feishuWebhookBound, feishuWebhookVerified, feishuWebhookHost: row.webhook_host || '', notificationChannel,
     notificationsEnabled: !!row.notifications_enabled, reachable: row.status === 'active' && feishuVerified && !!row.notifications_enabled };
 }
 export function listMemberViews(db, options = {}) {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { IntegrationError, requestJson, requiredString } from './http.js';
+import { normalizeWebhookUrl } from '../feishu-webhooks.js';
 
 const API = 'https://open.feishu.cn/open-apis';
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
@@ -98,4 +99,35 @@ export async function sendFeishuMessage({ appId, appSecret, openId, title = '', 
   }, 'Feishu message');
   if (typeof result.data?.message_id !== 'string' || !result.data.message_id) throw new IntegrationError('Feishu returned no message ID');
   return { messageId: result.data.message_id };
+}
+
+// Personal custom-bot webhooks are created inside a member's own Feishu or
+// Lark group, so they work across tenants without an application or OAuth.
+// The URL is a credential: never log it or include it in errors.
+export async function sendFeishuWebhookMessage({ webhookUrl, title = '', text = '', url = '', fetchImpl = fetch, timeoutMs = 10000 }) {
+  const { url: endpoint } = normalizeWebhookUrl(webhookUrl);
+  const parts = [boundedText(title, 200, 'message title'), boundedText(text, 6000, 'message text')].filter(Boolean);
+  if (url) {
+    requiredString(url, 'Feishu message URL', 2048);
+    let link;
+    try { link = new URL(url); } catch { throw new IntegrationError('Invalid Feishu message URL'); }
+    if (!['https:', 'http:'].includes(link.protocol) || link.username || link.password) throw new IntegrationError('Invalid Feishu message URL');
+    parts.push(link.href);
+  }
+  if (!parts.length) throw new IntegrationError('Feishu message is empty');
+  const { data } = await requestJson(endpoint, {
+    fetchImpl, timeoutMs, method: 'POST', headers: JSON_HEADERS,
+    body: JSON.stringify({ msg_type: 'text', content: { text: parts.join('\n\n') } }),
+    label: 'Feishu webhook',
+  });
+  // Feishu returns HTTP 200 with an application error code; older responses
+  // use StatusCode. Custom bots do not support message UUID deduplication.
+  const code = Number.isSafeInteger(data.code) ? data.code : Number.isSafeInteger(data.StatusCode) ? data.StatusCode : null;
+  if (code !== 0) {
+    const error = new IntegrationError(`Feishu webhook failed${code === null ? '' : ` (code ${code})`}`);
+    error.code = code === null ? 'FEISHU_ERROR' : `FEISHU_${code}`;
+    if ([19001, 19002, 19003, 19021].includes(code)) error.permanent = true;
+    throw error;
+  }
+  return { messageId: null };
 }

@@ -9,7 +9,7 @@ Node.js 24+, Express, node:sqlite, React/Vite. Single-team/repository/instance. 
 - GitHub writes are limited to creating issue/PR comments with the member's encrypted OAuth token; the platform never merges, closes, labels, assigns or edits code. Tokens are never returned or logged, and are deleted on disable or local revocation.
 - Every browser mutation requires exact configured Origin and `X-CSRF-Token` from session. Signed webhooks use raw-body HMAC instead of browser CSRF.
 - Member ID / GitHub fixed ID determine authorization and routing; login strings are display snapshots only.
-- Never return complete Feishu open_id, integration secrets, OAuth access tokens or raw webhook payloads to the client.
+- Never return complete Feishu open_id, personal webhook URL or its encrypted fields, integration secrets, OAuth access tokens or raw webhook payloads to the client.
 - Demo is isolated and guest-first, never uses real integrations. Explicit POST `/auth/demo/member` requires exact Origin + `X-Demo-Intent:1`; live mode returns404. No automatic member/admin cookies for anonymous visitors; demo roles/status still come from the database.
 
 ## Guest and member boundary
@@ -33,9 +33,9 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 
 ## Identity shapes
 
-`SessionUser`: `{id,memberId,githubId,login,name,avatarUrl,isAdmin,role,status,module,feishuBound,feishuVerified,notificationsEnabled,quietStart,quietEnd,githubWriteReady,githubWriteScopes}`.
+`SessionUser`: `{id,memberId,githubId,login,name,avatarUrl,isAdmin,role,status,module,feishuBound,feishuVerified,feishuOAuthBound,feishuOAuthVerified,feishuWebhookBound,feishuWebhookVerified,feishuWebhookHost,notificationChannel,notificationsEnabled,quietStart,quietEnd,githubWriteReady,githubWriteScopes}`. `feishuBound/feishuVerified` aggregate both channels; `notificationChannel` is `webhook` / `oauth` / null and a verified webhook takes precedence.
 
-`Member`: `{id,githubId,login,name,displayName,avatarUrl,module,notes?,role,status,version,firstLoginAt,lastLoginAt,createdAt,updatedAt,feishuBound,feishuVerified,notificationsEnabled,reachable}`. `notes` is administrator-only. `status` is pending_activation / active / disabled.
+`Member`: `{id,githubId,login,name,displayName,avatarUrl,module,notes?,role,status,version,firstLoginAt,lastLoginAt,createdAt,updatedAt,feishuBound,feishuVerified,feishuOAuthBound,feishuOAuthVerified,feishuWebhookBound,feishuWebhookVerified,feishuWebhookHost,notificationChannel,notificationsEnabled,reachable}`. `notes` is administrator-only. `status` is pending_activation / active / disabled.
 
 `Item`: original GitHub fields `{id,number,kind,title,body,url,state,author,authorId,assignees,assigneeIds,reviewers,reviewerIds,labels,updatedAt,createdAt,ciStatus,draft?,merged?}` plus local fields `{workflow,ownerMemberId,owner,ownerName,ownerStatus,ownerReachable,ownerIssue,module,priority,dueAt,overdue,version,needsReview}`. Legacy `owner` is display-only. `ownerIssue` may be disabled / pending_activation / unbound / needs_confirmation / notifications_disabled / legacy_unresolved.
 
@@ -43,13 +43,16 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 
 | Method and route | Request / response |
 | --- | --- |
-| GET /api/session | `{mode:'guest'|'member',user:SessionUser|null,csrfToken,demo,githubConfigured,feishuConfigured,repo,features}` |
+| GET /api/session | `{mode:'guest'|'member',user:SessionUser|null,csrfToken,demo,githubConfigured,feishuConfigured,feishuOAuthConfigured,feishuWebhookConfigured,repo,features}` |
 | GET /auth/github | OAuth redirect; first login auto-creates an active member, later logins reuse the fixed GitHub identity |
 | GET /auth/github/callback | One-time browser-bound OAuth state; creates/links the member and establishes a member session |
 | POST /auth/logout | `{}` → `{ok:true}` |
 | GET /auth/feishu/bind | Authenticated OAuth redirect with session-bound persistent binding generation |
 | GET /auth/feishu/callback | Link current identity as needs_confirmation; callback may not undo a later unbind |
-| POST /api/feishu/test | `{}` → `{sent,demo,user?}`; only current binding successful self-test marks verified |
+| PUT /api/feishu/webhook | `{url}` → `{webhook:{bound,verified,host,boundAt,verifiedAt},user}`; only `https://open.feishu.cn` / `https://open.larksuite.com` custom-bot URLs, encrypted at rest, generation bump, pending notifications cancelled |
+| POST /api/feishu/webhook/test | `{}` → `{sent,demo,channel:'webhook',user?}`; sends a test through the saved webhook and activates only the current binding generation |
+| DELETE /api/feishu/webhook | `{}` → `{ok:true,webhook,user}`; removes the encrypted URL and cancels queued envelopes |
+| POST /api/feishu/test | `{}` → `{sent,demo,user?}`; only current OAuth binding successful self-test marks verified |
 | DELETE /api/feishu/binding | `{}` → `{ok:true}`; revoke OAuth intent and queued/in-flight envelopes; preserve monotonic generation |
 | PATCH /api/preferences | `{notificationsEnabled,quietStart,quietEnd}` → `{user}`; quiet fields both present or both empty, Asia/Shanghai |
 
@@ -109,10 +112,10 @@ Members are created by their first GitHub login; there is no administrator creat
 | POST /api/reminders/run | Admin `{}` → `{queued,delivered,failed,skipped}` |
 | GET /api/notifications | `{notifications:[{id,title,recipient,recipientMemberId,status,reason,createdAt,error,errorCode,attempts,nextAt}]}`; admin all, member own |
 | GET /api/admin/audit-logs | `{logs,total,page,pageSize}`; optional exact action; each log has actor/action/targetType/targetId/before/after/requestId/createdAt |
-| GET /api/admin/integration-status | `{demo,repo,lastSync,syncError,nextSyncAllowedAt,githubConfigured,feishuConfigured,syncIntervalMinutes,webhookIntervalSeconds,webhook,notifications,membership,schemaVersion}` |
+| GET /api/admin/integration-status | `{demo,repo,lastSync,syncError,nextSyncAllowedAt,githubConfigured,feishuConfigured,feishuWebhookConfigured,syncIntervalMinutes,webhookIntervalSeconds,webhook,notifications,membership,schemaVersion}` |
 | POST /api/admin/webhooks/:id/retry | Admin `{}` → `{ok:true}`; only existing unfinished accepted delivery, completed409 |
 | POST /api/webhooks/github | HMAC-valid target-repository event persisted / deduped before202; ping200; no business data in response |
 
-Notification status is pending / sending / sent / failed / skipped / cancelled. Cancellation is not resurrected by a failed in-flight send. If upstream accepted while revocation raced, keep cancellation plus DELIVERED_AFTER_REVOCATION and audit actual external acceptance; no retry. UUID-based upstream dedup is bounded, not exactly-once.
+Notification status is pending / sending / sent / failed / skipped / cancelled. A verified personal webhook takes precedence over a verified enterprise OAuth binding; switching or unbinding either channel bumps its generation and cancels queued envelopes. Cancellation is not resurrected by a failed in-flight send. If upstream accepted while revocation raced, keep cancellation plus DELIVERED_AFTER_REVOCATION and audit actual external acceptance; no retry. UUID-based upstream dedup is bounded, not exactly-once; personal custom bots do not support UUID dedup.
 
 Default polling10 minutes, event/message worker15 seconds; neither is a guaranteed delivery SLA. Global notifications default disabled; invalid/unreachable recipients are visible, not silently treated as delivered. CI instant-failure messages, GitHub writes, multi-repo and Feishu interactive cards are explicitly deferred.
