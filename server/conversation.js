@@ -526,7 +526,7 @@ export async function rerunItemCI(db, config, { member, itemId, eventId, fetchIm
   const runId = Number(detail.runId);
   if (!Number.isSafeInteger(runId) || runId < 1) throw fail(409, '缺少流水线运行 ID，请先刷新同步', 'CI_RUN_ID_MISSING');
   if (config.demo) return { ok: true, demo: true, runId };
-  const authUrl = `/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${encodeURIComponent(itemId)}` })}`;
+  const authUrl = `/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${encodeURIComponent(itemId)}?ci=${encodeURIComponent(eventId)}&ciName=${encodeURIComponent(detail.name || '')}` })}`;
   const memberToken = getGitHubToken(db, member.id, config);
   const serverToken = typeof config.githubActionsToken === 'string' ? config.githubActionsToken.trim() : '';
   if (!memberToken && !serverToken) throw Object.assign(fail(409, '需要授权 GitHub 写入权限', 'GITHUB_WRITE_AUTH_REQUIRED'), { authUrl });

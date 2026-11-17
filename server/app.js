@@ -48,7 +48,13 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   }
   function safeReturnTo(value) {
     if(typeof value!=='string'||value.length>1000||value.includes('\\')||/[\r\n]/.test(value)) return '/workspace';
-    try {const url=new URL(value,config.baseUrl);return url.origin===config.baseUrl&&url.pathname==='/workspace'?url.pathname+url.search+url.hash:'/workspace';} catch {return '/workspace';}
+    try {
+      const url=new URL(value,config.baseUrl);
+      // Detail pages need to be a legal post-OAuth target so a CI or comment
+      // authorization returns to the exact item instead of the workspace root.
+      const allowed=url.pathname==='/workspace'||/^\/workspace\/items\/[^/]+$/.test(url.pathname);
+      return url.origin===config.baseUrl&&allowed?url.pathname+url.search+url.hash:'/workspace';
+    } catch {return '/workspace';}
   }
   function signInMember(profile,req,res,{accessToken='',scopes=''}={}) {
     const githubId=identityId(profile.githubId ?? profile.id);
