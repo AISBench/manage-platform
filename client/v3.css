@@ -224,9 +224,13 @@
 .conversation-empty{text-align:center;padding:40px 20px;color:#a9b5be;font-size:11px}
 .message-list.is-github{display:flex;flex-direction:column;gap:12px;padding-top:14px}
 .gh-comment{display:flex;gap:8px;align-items:flex-start}
-.gh-thread{display:flex;flex-direction:column;gap:8px}
-.gh-comment.is-reply{margin-left:36px}
-.gh-comment.is-reply .gh-comment-main{border-color:#e8eef1;background:#fcfdfe}
+.gh-thread{display:flex;flex-direction:column;border:1px solid #dfe6ea;border-radius:6px;background:#fff;overflow:hidden}
+.gh-thread .gh-comment{padding:10px 12px}
+.gh-thread>.gh-comment+.gh-comment{border-top:1px solid #eef2f4}
+.gh-thread .gh-comment-main{border:0;border-radius:0;background:transparent;overflow:visible}
+.gh-thread .gh-comment-head{background:transparent;border-bottom:0;padding:0 0 6px}
+.gh-thread .gh-comment.is-reply{position:relative;padding-left:46px}
+.gh-thread .gh-comment.is-reply::before{content:'';position:absolute;left:24px;top:0;bottom:0;width:2px;background:#eef2f4}
 .gh-comment-main{flex:1;min-width:0;border:1px solid #dfe6ea;border-radius:6px;background:#fff;overflow:hidden}
 .gh-comment-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 10px;background:#f6f8fa;border-bottom:1px solid #e6ebee;font-size:9px;color:#7b8d99}
 .gh-comment-head strong{font-size:10px;color:#334b5a}
