@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { openDatabase, seedDemo, listItems, getSetting, setSetting, addActivity, addAudit } from './db.js';
 import { authMiddleware, requireUser, requireAdmin, csrfGuard, newOAuthState, consumeOAuthState, createSession, cookies, hashToken, sessionUser } from './auth.js';
-import { createServices, isParticipant } from './services.js';
+import { createServices, isParticipant, nextNotificationAt } from './services.js';
 import { verifyGitHubSignature, identityId } from './integrations/github.js';
 import { exchangeFeishuCode, feishuAuthorizeUrl, sendFeishuMessage, sendFeishuWebhookMessage } from './integrations/feishu.js';
 import { deleteWebhook, decryptWebhookUrl, getWebhook, saveWebhook, webhookView } from './feishu-webhooks.js';
@@ -22,7 +22,7 @@ const fail=(status,message)=>Object.assign(new Error(message),{status});
 const version=z.number().int().positive(), id=z.string().min(1).max(100), short=z.string().trim().max(120);
 const ruleSchema=z.object({enabled:z.boolean(),staleHours:z.number().int().min(1).max(8760),reminderCooldownHours:z.number().int().min(1).max(720)}).strict();
 const time=z.union([z.literal(''),z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/)]);
-const preferenceSchema=z.object({notificationsEnabled:z.boolean(),quietStart:time,quietEnd:time}).strict().refine(p=>Boolean(p.quietStart)===Boolean(p.quietEnd));
+const preferenceSchema=z.object({notificationsEnabled:z.boolean(),quietStart:time,quietEnd:time,notificationMode:z.enum(['realtime','hourly','daily']).optional(),digestHour:z.number().int().min(0).max(23).optional()}).strict().refine(p=>Boolean(p.quietStart)===Boolean(p.quietEnd));
 const itemPatch=z.object({version,workflow:z.enum(['todo','in_progress','blocked','done']).optional(),ownerMemberId:z.union([id,z.null()]).optional(),priority:z.enum(['low','normal','high']).optional(),dueAt:z.union([z.iso.datetime({offset:true}),z.null()]).optional()}).strict().refine(v=>Object.keys(v).length>1);
 const memberPatch=z.object({version,displayName:short.optional(),module:short.optional(),notes:z.string().max(2000).optional(),role:z.enum(['admin','member']).optional()}).strict().refine(v=>Object.keys(v).length>1);
 function pagination(query) {return {page:z.coerce.number().int().min(1).max(100000).parse(query.page||1),pageSize:z.coerce.number().int().min(1).max(100).parse(query.pageSize||20)};}
@@ -351,12 +351,21 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.put('/api/rules',requireAdmin,(req,res)=>{fresh(req,true);const rules=ruleSchema.parse(req.body),before=getSetting(db,'rules');transact(()=>{setSetting(db,'rules',rules);audit(req,'rules.update','settings','rules',before,rules);});res.json({rules});});
   app.post('/api/reminders/run',requireAdmin,async(req,res)=>{fresh(req,true);res.json(await services.runReminders());});
   app.get('/api/notifications',(req,res)=>{
-    const fields='n.id,n.title,COALESCE(m.github_login,n.recipient) AS recipient,n.recipient_member_id AS recipientMemberId,n.status,n.reason,n.created_at AS createdAt,n.error,n.error_code AS errorCode,n.attempts,n.next_at AS nextAt';
+    const fields='n.id,n.title,COALESCE(m.github_login,n.recipient) AS recipient,n.recipient_member_id AS recipientMemberId,n.status,n.reason,n.created_at AS createdAt,n.error,n.error_code AS errorCode,n.attempts,n.next_at AS nextAt,n.event_type AS eventType';
     const base=`SELECT ${fields} FROM notifications n LEFT JOIN members m ON m.id=n.recipient_member_id`;
     const notifications=req.user.isAdmin?db.prepare(`${base} ORDER BY n.created_at DESC LIMIT 200`).all():db.prepare(`${base} WHERE n.recipient_member_id=? ORDER BY n.created_at DESC LIMIT 200`).all(req.member.id);res.json({notifications});
   });
   app.patch('/api/preferences',(req,res)=>{
-    const p=preferenceSchema.parse(req.body);transact(()=>{db.prepare('UPDATE users SET notifications_enabled=?,quiet_start=?,quiet_end=? WHERE member_id=?').run(Number(p.notificationsEnabled),p.quietStart,p.quietEnd,req.member.id);db.prepare("UPDATE notifications SET next_at=0 WHERE recipient_member_id=? AND status='pending'").run(req.member.id);audit(req,'preferences.update','member',req.member.id,null,p);});res.json({user:sessionUser(db,req.member.id,config)});
+    const p=preferenceSchema.parse(req.body);transact(()=>{
+      const current=db.prepare('SELECT notification_mode,digest_hour FROM users WHERE member_id=?').get(req.member.id)||{};
+      const mode=p.notificationMode ?? current.notification_mode ?? 'realtime';
+      const digestHour=p.digestHour ?? current.digest_hour ?? 9;
+      db.prepare('UPDATE users SET notifications_enabled=?,quiet_start=?,quiet_end=?,notification_mode=?,digest_hour=? WHERE member_id=?').run(Number(p.notificationsEnabled),p.quietStart,p.quietEnd,mode,digestHour,req.member.id);
+      const nextAt=nextNotificationAt(mode,digestHour);
+      const pending=db.prepare("SELECT id FROM notifications WHERE recipient_member_id=? AND status='pending'").all(req.member.id);
+      for(const notice of pending) db.prepare('UPDATE notifications SET next_at=? WHERE id=?').run(nextAt,notice.id);
+      audit(req,'preferences.update','member',req.member.id,null,{...p,notificationMode:mode,digestHour});
+    });res.json({user:sessionUser(db,req.member.id,config)});
   });
   app.delete('/api/feishu/binding',(req,res)=>{
     transact(()=>{

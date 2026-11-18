@@ -72,7 +72,7 @@ function markRemoteDeleted(db, itemId, remoteKeys) {
 function commentRow(comment) {
   return {
     kind: 'issue_comment', remoteKey: `comment:${comment.id}`, author: authorOf(comment.user),
-    body: String(comment.body || '').slice(0, BODY_LIMIT), createdAt: comment.created_at, updatedAt: comment.updated_at || comment.created_at,
+    body: String(comment.body || '').slice(0, BODY_LIMIT), createdAt: comment.created_at || now(), updatedAt: comment.updated_at || comment.created_at || now(),
     url: typeof comment.html_url === 'string' ? comment.html_url : null,
   };
 }
@@ -80,7 +80,7 @@ function reviewRow(review) {
   return {
     kind: 'review', remoteKey: `review:${review.id}`, author: authorOf(review.user),
     body: String(review.body || '').slice(0, BODY_LIMIT), state: typeof review.state === 'string' ? review.state : null,
-    createdAt: review.submitted_at || review.created_at, updatedAt: review.submitted_at || review.created_at,
+    createdAt: review.submitted_at || review.created_at || now(), updatedAt: review.submitted_at || review.created_at || now(),
     url: typeof review.html_url === 'string' ? review.html_url : null,
   };
 }
@@ -93,7 +93,7 @@ function reviewCommentRow(comment) {
     side: comment.side === 'LEFT' || comment.side === 'RIGHT' ? comment.side : null,
     diffHunk: typeof comment.diff_hunk === 'string' ? comment.diff_hunk.slice(0, BODY_LIMIT) : null,
     inReplyTo: comment.in_reply_to_id ? String(comment.in_reply_to_id) : null,
-    createdAt: comment.created_at, updatedAt: comment.updated_at || comment.created_at,
+    createdAt: comment.created_at || now(), updatedAt: comment.updated_at || comment.created_at || now(),
     url: typeof comment.html_url === 'string' ? comment.html_url : null,
   };
 }
