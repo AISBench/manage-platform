@@ -152,6 +152,14 @@
 .conversation-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid #eef2f4}
 .conversation-head h2{display:flex;align-items:center;gap:7px;font-size:13px;color:#4f6573;font-weight:600}
 .conversation-head p{font-size:9px;color:#a1afb9;margin-top:5px}
+.conversation-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 20px;border-bottom:1px solid #eef2f4;background:#fbfcfd}
+.seg-control{display:inline-flex;border:1px solid #dbe4e9;border-radius:6px;overflow:hidden;background:#fff}
+.seg-control button{border:0;background:transparent;padding:4px 10px;font-size:10px;color:#7b8d99;cursor:pointer}
+.seg-control button+button{border-left:1px solid #e6ecef}
+.seg-control button.active{background:#eef4f7;color:#33505f;font-weight:600}
+.author-filter{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#96a5af}
+.author-filter select{font-size:10px;padding:3px 6px;border:1px solid #dbe4e9;border-radius:5px;background:#fff;color:#5b7280;max-width:160px}
+.conversation-count{font-size:9px;color:#a9b5be;margin-left:auto}
 .composer{padding:14px 20px;border-bottom:1px solid #eef2f4;background:#fbfcfd}
 .composer textarea{width:100%;border:1px solid #e2e9ec;border-radius:7px;padding:10px 12px;font-size:11px;line-height:1.8;color:#5c707d;resize:vertical;background:#fff}
 .composer textarea:focus{outline:none;border-color:#89bfb2;box-shadow:0 0 0 3px #0d94880a}
@@ -214,6 +222,16 @@
 .read-member{display:inline-flex;align-items:center;gap:4px}
 .read-member .avatar{width:18px;height:18px;font-size:7px;border-width:1px}
 .conversation-empty{text-align:center;padding:40px 20px;color:#a9b5be;font-size:11px}
+.message-list.is-github{display:flex;flex-direction:column;gap:12px;padding-top:14px}
+.gh-comment{display:flex;gap:8px;align-items:flex-start}
+.gh-comment-main{flex:1;min-width:0;border:1px solid #dfe6ea;border-radius:6px;background:#fff;overflow:hidden}
+.gh-comment-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 10px;background:#f6f8fa;border-bottom:1px solid #e6ebee;font-size:9px;color:#7b8d99}
+.gh-comment-head strong{font-size:10px;color:#334b5a}
+.gh-comment-head time{margin-left:auto;font-size:8px;color:#a9b6bf}
+.gh-comment-context{padding:9px 10px 0}
+.gh-comment-context .review-code{margin-top:0}
+.gh-comment-body{padding:9px 12px;font-size:11px;line-height:1.8;color:#5f7280;overflow-wrap:anywhere}
+.gh-comment-body .item-body{margin:0;padding:0;background:none;border:0;max-height:none;font-size:11px;color:#5f7280;line-height:1.8}
 .conversation-more{display:flex;margin:0 auto 18px}
 .row-unread{font-size:8px;background:#eef7f4;color:#409a83;border-radius:3px;padding:1px 5px;white-space:nowrap}
 .row-unread.mention{background:#fff4dd;color:#b88a32}

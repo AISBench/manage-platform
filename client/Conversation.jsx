@@ -51,6 +51,26 @@ function ReviewCode({ message, itemUrl }) {
   </div>;
 }
 
+function GitHubMessageCard({ message, itemUrl }) {
+  return <article className="gh-comment" data-message-id={message.id}>
+    <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
+    <div className="gh-comment-main">
+      <div className="gh-comment-head">
+        <strong>{message.author.name || message.author.login}</strong>
+        <span>@{message.author.login}</span>
+        {message.source === 'platform' && <Badge tone={message.deliveryStatus === 'demo' ? 'neutral' : 'teal'}>{message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台'}</Badge>}
+        {message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}
+        {message.kind === 'review_comment' && <Badge tone="purple">{message.threadResolved ? '已解决的检视意见' : '行内评论'}</Badge>}
+        {message.remoteDeleted && <Badge tone="red">已删除</Badge>}
+        <time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>
+        {message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}
+      </div>
+      {message.kind === 'review_comment' && <div className="gh-comment-context"><ReviewCode message={message} itemUrl={itemUrl} /></div>}
+      {message.body && <div className="gh-comment-body"><Markdown text={message.body} /></div>}
+    </div>
+  </article>;
+}
+
 function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying, canWrite, onResolve, resolving }) {
   const elementRef = useRef(null);
   const own = message.author.memberId && message.author.memberId === user.memberId;
@@ -96,16 +116,37 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   const [reads, setReads] = useState(null);
   const [retrying, setRetrying] = useState('');
   const [resolving, setResolving] = useState('');
+  const viewKey = `conversation-view:${itemId}`;
+  const [view, setView] = useState(() => { try { return localStorage.getItem(viewKey) === 'timeline' ? 'timeline' : 'github'; } catch { return 'github'; } });
+  const [authorFilter, setAuthorFilter] = useState('all');
   const pendingReads = useRef(new Set());
   const observer = useRef(null);
   const flushTimer = useRef(null);
   const messages = [...(data?.messages || []), ...(older || [])];
+  const authorOptions = [];
+  const seenAuthors = new Set();
+  for (const message of messages) {
+    const key = (message.author?.login || '').toLowerCase();
+    if (!key || seenAuthors.has(key)) continue;
+    seenAuthors.add(key);
+    authorOptions.push({ login: message.author.login, name: message.author.name || message.author.login });
+  }
+  authorOptions.sort((a, b) => a.login.localeCompare(b.login));
+  const visibleMessages = authorFilter === 'all' ? messages : messages.filter(message => (message.author?.login || '').toLowerCase() === authorFilter);
+  const orderedMessages = view === 'github'
+    ? [...visibleMessages].sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt))
+    : visibleMessages;
   const canWrite = session.demo || user.githubWriteReady;
   const open = data?.item?.state === 'open';
   const participants = data?.item ? [data.item.author, ...(data.item.assignees || []), ...(data.item.reviewers || [])].filter(Boolean) : [];
 
   useEffect(() => { try { setDraft(localStorage.getItem(draftKey) || ''); } catch { setDraft(''); } }, [draftKey]);
   useEffect(() => { try { if (draft) localStorage.setItem(draftKey, draft); else localStorage.removeItem(draftKey); } catch { /* drafts are best-effort */ } }, [draft, draftKey]);
+  useEffect(() => {
+    try { setView(localStorage.getItem(viewKey) === 'timeline' ? 'timeline' : 'github'); } catch { setView('github'); }
+    setAuthorFilter('all');
+  }, [viewKey]);
+  useEffect(() => { try { localStorage.setItem(viewKey, view); } catch { /* view preference is best-effort */ } }, [view, viewKey]);
 
   useEffect(() => {
     observer.current = new IntersectionObserver(entries => {
@@ -122,9 +163,10 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   }, [itemId]);
 
   useEffect(() => {
-    for (const element of document.querySelectorAll('.message-card[data-message-id]')) observer.current?.observe(element);
-    return () => { for (const element of document.querySelectorAll('.message-card[data-message-id]')) observer.current?.unobserve(element); };
-  }, [messages.length]);
+    const elements = document.querySelectorAll('.conversation-panel [data-message-id]');
+    for (const element of elements) observer.current?.observe(element);
+    return () => { for (const element of elements) observer.current?.unobserve(element); };
+  }, [messages.length, view, authorFilter]);
 
   function toggle(id) { setExpanded(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
   async function showReads(messageId) {
@@ -158,8 +200,22 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     finally { setResolving(''); }
   }
   const unread = data?.unread?.unread || 0;
+  const moreButton = messages.length >= 50 ? <button className="btn btn-secondary btn-small conversation-more" onClick={onLoadOlder}>加载更早消息</button> : null;
   return <section className="conversation-panel">
-    <div className="conversation-head"><div><h2><MessageCircle size={17} />对话</h2><p>最新消息在前 · 平台发言以你的 GitHub 身份同步</p></div><Badge tone={unread ? 'amber' : 'neutral'}>{unread ? `${unread} 条未读` : '已读'}{data?.unread?.mentions ? ` · @我 ${data.unread.mentions}` : ''}</Badge></div>
+    <div className="conversation-head"><div><h2><MessageCircle size={17} />对话</h2><p>{view === 'github' ? '与 GitHub 评论区一致（时间正序）' : '平台时间视图（最新在前）'} · 平台发言以你的 GitHub 身份同步</p></div><Badge tone={unread ? 'amber' : 'neutral'}>{unread ? `${unread} 条未读` : '已读'}{data?.unread?.mentions ? ` · @我 ${data.unread.mentions}` : ''}</Badge></div>
+    <div className="conversation-tools">
+      <div className="seg-control" role="group" aria-label="评论区视图">
+        <button type="button" className={view === 'github' ? 'active' : ''} aria-pressed={view === 'github'} onClick={() => setView('github')}>GitHub 视图</button>
+        <button type="button" className={view === 'timeline' ? 'active' : ''} aria-pressed={view === 'timeline'} onClick={() => setView('timeline')}>时间视图</button>
+      </div>
+      <label className="author-filter">用户
+        <select value={authorFilter} onChange={event => setAuthorFilter(event.target.value)}>
+          <option value="all">全部用户</option>
+          {authorOptions.map(author => <option key={author.login} value={author.login.toLowerCase()}>{author.name}</option>)}
+        </select>
+      </label>
+      <span className="conversation-count">{visibleMessages.length} 条</span>
+    </div>
     <form className="composer" onSubmit={send}>
       {!canWrite && !session.demo && <div className="composer-auth"><CircleAlert size={15} />{!session.githubWriteConfigured ? <span>服务端未配置 TOKEN_ENCRYPTION_KEY，GitHub 写权限无法保存，请联系管理员。</span> : !/(^|[\s,])(repo|public_repo)([\s,]|$)/.test(session.githubOAuthScopes || '') ? <span>当前 OAuth scope 不含仓库写权限（需要 public_repo 或 repo），请联系管理员更新 GITHUB_OAUTH_SCOPE。</span> : <><span>需要 GitHub 评论写权限后才能发言。</span><a className="btn btn-small btn-secondary" href={`/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${itemId}` })}`}>授权 GitHub</a></>}</div>}
       <MarkdownEditor value={draft} onChange={setDraft} disabled={!canWrite || !open || sending} placeholder={!open ? '已关闭的事项不能继续发言' : canWrite ? '写下你的回复… 支持 Markdown、@成员、#事务引用（Cmd/Ctrl+Enter 发送）' : '授权后即可发言'} participants={participants} maxLength={20000} onSubmit={send} />
@@ -169,8 +225,11 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     </form>
     {error ? <ErrorBox error={error} retry={() => reload({ refresh: true })} /> : loading && !data ? <Spinner label="正在读取对话…" /> : <>
       {unread > 0 && <div className="unread-banner">有 {unread} 条未读消息{data.unread.mentions ? `，其中 ${data.unread.mentions} 条 @你` : ''}</div>}
-      <div className="message-list">{messages.length ? messages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />) : <div className="conversation-empty">还没有评论，发送第一条消息吧。</div>}</div>
-      {messages.length >= 50 && <button className="btn btn-secondary btn-small conversation-more" onClick={onLoadOlder}>加载更早消息</button>}
+      {view === 'github' && moreButton}
+      <div className={`message-list ${view === 'github' ? 'is-github' : ''}`}>{orderedMessages.length ? orderedMessages.map(message => view === 'github'
+        ? <GitHubMessageCard key={message.id} message={message} itemUrl={data?.item?.url} />
+        : <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
+      {view === 'timeline' && moreButton}
     </>}
   </section>;
 }
