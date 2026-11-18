@@ -53,14 +53,14 @@ function upsertMessage(db, itemId, row) {
         .run(row.kind, memberId, author.login, author.githubId || null, author.avatarUrl || '', existing.id);
     }
     syncMentions(db, existing.id, row.body);
-    return existing.id;
+    return { id: existing.id, inserted: false };
   }
   const id = randomUUID();
   db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,in_reply_to_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,path,line,state,delivery_status,remote_deleted,created_at,updated_at,synced_at,diff_hunk,start_line,side)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'synced',0,?,?,?,?,?,?)`)
     .run(id, itemId, 'github', row.kind, row.remoteKey, row.inReplyTo || null, memberId, author.login, author.githubId || null, author.avatarUrl || '', row.body, row.url || null, row.path || null, row.line ?? null, row.state || null, row.createdAt, row.updatedAt || row.createdAt, at, row.diffHunk || null, row.startLine ?? null, row.side || null);
   syncMentions(db, id, row.body);
-  return id;
+  return { id, inserted: true };
 }
 
 function markRemoteDeleted(db, itemId, remoteKeys) {
@@ -266,6 +266,7 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
   const item = itemRow(db, itemId);
   if (config.demo) return { skipped: true, item, demo: true };
   const sync = db.prepare('SELECT * FROM item_conversation_sync WHERE item_id=?').get(item.id);
+  const hadBaseline = !!sync?.messages_synced_at;
   const messagesAt = sync?.messages_synced_at ? Date.parse(sync.messages_synced_at) : 0;
   if (!force && Number.isFinite(messagesAt) && Date.now() - messagesAt < TTL_MS) return { skipped: true, item };
   const token = config.githubToken || '';
@@ -308,11 +309,13 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
 
   const full = comments.length + reviews.length + reviewComments.length < MESSAGE_LIMIT && timeline.length < EVENT_LIMIT;
   const seen = new Set();
+  const insertedMessages = [];
+  const store = row => { const result = upsertMessage(db, item.id, row); if (result.inserted) insertedMessages.push({ ...row, id: result.id }); };
   db.exec('BEGIN IMMEDIATE');
   try {
-    for (const comment of comments) { const row = commentRow(comment); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
-    for (const review of reviews) { const row = reviewRow(review); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
-    for (const comment of reviewComments) { const row = reviewCommentRow(comment); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
+    for (const comment of comments) { const row = commentRow(comment); seen.add(row.remoteKey); store(row); }
+    for (const review of reviews) { const row = reviewRow(review); seen.add(row.remoteKey); store(row); }
+    for (const comment of reviewComments) { const row = reviewCommentRow(comment); seen.add(row.remoteKey); store(row); }
     if (full) markRemoteDeleted(db, item.id, seen);
     for (const raw of timeline) {
       if (!categorizeTimeline(raw)) continue;
@@ -329,15 +332,25 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
       .run(item.id, at, at, at, full ? 0 : 1);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
-  return { skipped: false, item: itemRow(db, item.id), messages: comments.length + reviews.length + reviewComments.length, events: timeline.length, ci: ciEvents.length };
+  return { skipped: false, item: itemRow(db, item.id), messages: comments.length + reviews.length + reviewComments.length, events: timeline.length, ci: ciEvents.length,
+    newMessages: hadBaseline ? insertedMessages.map(row => ({
+      id: row.id, remoteKey: row.remoteKey, kind: row.kind,
+      authorLogin: row.author.login, authorGithubId: row.author.githubId || null,
+      body: row.body, url: row.url || null, path: row.path || null, line: row.line ?? null,
+      state: row.state || null, inReplyTo: row.inReplyTo || null, createdAt: row.createdAt,
+    })) : [] };
 }
 
-export async function syncConversationBatch(db, config, { limit = 20, fetchImpl = fetch } = {}) {
+export async function syncConversationBatch(db, config, { limit = 20, fetchImpl = fetch, onNewMessages } = {}) {
   if (config.demo) return { synced: 0 };
   const items = listItems(db, Date.now(), config.feishuAppId || '').filter(item => item.state === 'open').slice(0, limit);
   let synced = 0;
   for (const item of items) {
-    try { const result = await syncItemConversation(db, config, item.id, { fetchImpl }); if (!result.skipped) synced++; }
+    try {
+      const result = await syncItemConversation(db, config, item.id, { fetchImpl });
+      if (!result.skipped) synced++;
+      if (result.newMessages?.length && typeof onNewMessages === 'function') await onNewMessages(result.item, result.newMessages);
+    }
     catch (error) { if (error.status === 429 || error.retryAt) break; }
   }
   return { synced };

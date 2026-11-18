@@ -109,6 +109,37 @@ test('hourly digest batches several events into one Feishu message', async t => 
   assert.match(sent[0].text, /2\. \[新评论\]/);
 });
 
+test('polling conversation sync notifies new mentions without replaying history', async t => {
+  const { db, bob, carol, services, sent } = fixture(t, { itemExtra: { kind: 'issue' } });
+  const comment = (id, body, login = 'dave', type = 'User') => ({ id, body, user: { id: 777, login, type }, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), html_url: `https://github.com/${REPO}/issues/101#issuecomment-${id}` });
+  const detail = { number: 101, state: 'open', title: 'Regression PR', body: '', html_url: `https://github.com/${REPO}/issues/101`, user: { id: 502, login: 'bob' }, assignees: [], labels: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  const fetchFor = comments => async url => {
+    const target = String(url);
+    if (target.includes('/issues/101/comments')) return new Response(JSON.stringify(comments), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (target.includes('/issues/101/timeline')) return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (target.includes('/issues/101')) return new Response(JSON.stringify(detail), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const old = comment(1, '旧评论 @carol');
+  const fresh = comment(2, '请看一下 @carol');
+  await services.syncConversations({ fetchImpl: fetchFor([old]) });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0, 'first sync establishes a baseline without notifying history');
+  const past = new Date(Date.now() - 60000).toISOString();
+  db.prepare("UPDATE item_conversation_sync SET messages_synced_at=?,events_synced_at=?,ci_synced_at=? WHERE item_id='github:101'").run(past, past, past);
+  await services.syncConversations({ fetchImpl: fetchFor([old, fresh]) });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 2);
+  await services.runReminders();
+  assert.match(byOpenId(sent, bob).title, /^\[新评论\]/);
+  assert.match(byOpenId(sent, carol).title, /^\[有人 @你\]/);
+  assert.match(byOpenId(sent, carol).text, /@dave 在评论中 @你/);
+  sent.length = 0;
+  db.prepare("UPDATE item_conversation_sync SET messages_synced_at=?,events_synced_at=?,ci_synced_at=? WHERE item_id='github:101'").run(past, past, past);
+  await services.syncConversations({ fetchImpl: fetchFor([old, fresh, comment(3, '@bob bot output', 'github-actions[bot]', 'Bot')]) });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 2, 'replayed comments and bot comments do not duplicate notifications');
+  await services.runReminders();
+  assert.equal(sent.length, 0);
+});
+
 test('digest scheduling uses Asia/Shanghai boundaries', () => {
   const now = Date.UTC(2026, 0, 1, 2, 30); // 10:30 Asia/Shanghai
   assert.equal(nextNotificationAt('realtime', 9, now), 0);
