@@ -54,7 +54,9 @@ export function CIColumn({ events = [], itemId, user, session, notify, onChanged
 }
 
 export function OperationsColumn({ events = [] }) {
-  return <section className="detail-card"><div className="detail-card-title"><h3><RefreshCw size={16} />操作记录</h3><Badge>{events.length} 条</Badge></div>{events.length ? <div className="operation-list">{events.map(event => <article className="operation-item" key={event.id}><Avatar login={event.actor.login} src={event.actor.avatarUrl} size="tiny" /><div><p><strong>{event.actor.login || 'GitHub'}</strong> {event.summary}</p><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString('zh-CN')}</time></div></article>)}</div> : <Empty text="标签、指派、关闭、重命名等动态会显示在这里。" />}</section>;
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? events : events.slice(0, 10);
+  return <section className="detail-card"><div className="detail-card-title"><h3><RefreshCw size={16} />操作记录</h3><Badge>{events.length} 条</Badge></div>{events.length ? <><div className="operation-list">{shown.map(event => <article className="operation-item" key={event.id}><Avatar login={event.actor.login} src={event.actor.avatarUrl} size="tiny" /><div><p><strong>{event.actor.login || 'GitHub'}</strong> {event.summary}</p><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString('zh-CN')}</time></div></article>)}</div>{events.length > 10 && <button type="button" className="text-button operation-more" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '收起操作记录' : `展开全部 ${events.length} 条`}</button>}</> : <Empty text="标签、指派、关闭、重命名等动态会显示在这里。" />}</section>;
 }
 
 export function InfoColumn({ item, user, onSaved, notify }) {
