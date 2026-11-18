@@ -34,7 +34,7 @@ test('versioned additive migration retains all original row data and reopens ide
   old.prepare('INSERT INTO items(id,number,data,workflow,owner,priority,due_at) VALUES (?,?,?,?,?,?,?)').run('legacy', 9, '{"title":"Legacy edit"}', 'blocked', 'alice', 'high', '2030-01-01');
   old.prepare('INSERT INTO settings(key,value) VALUES (?,?)').run('custom', JSON.stringify({ keep: true })); old.close();
   let db = openDatabase(filename);
-  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6, 7, 8, 11]);
   assert.ok(db.prepare('PRAGMA table_info(members)').all().some(column => column.name === 'avatar_url'), 'schema v4 adds the member avatar column');
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='item_messages'").get(), 'schema v5 adds the conversation tables');
   assert.ok(db.prepare('PRAGMA table_info(item_messages)').all().some(column => column.name === 'diff_hunk'), 'schema v6 stores review diff hunks');
