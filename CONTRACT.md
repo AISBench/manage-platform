@@ -75,7 +75,7 @@ Every item PATCH and claim needs current version. Local workflow never closes/me
 
 | Method and route | Request / response |
 | --- | --- |
-| GET /api/items/:id/conversation | `{item,messages,events:{ci,operation},unread,sync,syncError?}`; query `before`, `limit≤100`, `refresh=0|1`; messages newest-first, long bodies are collapsed by the client |
+| GET /api/items/:id/conversation | `{item,messages,events:{ci,operation},unread,sync,syncError?}`; query `before`, `limit≤100`, `refresh=0|1`; messages newest-first, long bodies are collapsed by the client; inline review comments carry `threadResolved` (GraphQL resolution, cached across failed refreshes) and each message carries `readByMe` |
 | POST /api/items/:id/conversation/sync | Member; force incremental GitHub sync of comments/reviews/timeline/CI |
 | POST /api/items/:id/messages | `{body,clientId?}` →201 `{message}`; comments are posted to GitHub as the member; 409 `GITHUB_WRITE_AUTH_REQUIRED` + `authUrl` when authorization is missing |
 | POST /api/items/:id/messages/:messageId/retry | Retry a failed local message, dedupe by clientId |

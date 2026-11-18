@@ -218,6 +218,55 @@ export async function fetchPullReviewComments({ repo, number, token, fetchImpl =
   const { base, request } = reader(repo, token, fetchImpl);
   return paginate(`${base}/pulls/${issueNumber(number)}/comments?per_page=100&page=1`, request, data => data);
 }
+// REST never exposes whether a review thread is resolved; GraphQL is the only
+// source, so the resolution flag is mapped onto the comment database ids.
+export async function fetchPullReviewThreads({ repo, number, token, fetchImpl = fetch }) {
+  repoBase(repo);
+  if (!token) return [];
+  const [owner, name] = repo.split('/');
+  const query = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+    repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){
+      pageInfo{hasNextPage endCursor}
+      nodes{isResolved comments(first:100){nodes{databaseId}}}
+    }}}}`;
+  const headers = {
+    Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
+    'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}`,
+  };
+  const threads = [];
+  let cursor = null;
+  for (let page = 0; page < 10; page += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    let response;
+    try {
+      response = await fetchImpl('https://api.github.com/graphql', {
+        method: 'POST', headers, body: JSON.stringify({ query, variables: { owner, name, number: issueNumber(number), cursor } }),
+        redirect: 'error', signal: controller.signal,
+      });
+    } catch {
+      throw new IntegrationError('GitHub review thread request failed');
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response?.ok) throw new IntegrationError('GitHub review thread request failed', response?.status);
+    let payload;
+    try { payload = await response.json(); } catch { throw new IntegrationError('GitHub returned invalid review thread data'); }
+    if (Array.isArray(payload?.errors) && payload.errors.length) throw new IntegrationError('GitHub returned invalid review thread data');
+    const connection = payload?.data?.repository?.pullRequest?.reviewThreads;
+    if (!connection || !Array.isArray(connection.nodes)) throw new IntegrationError('GitHub returned invalid review thread data');
+    for (const node of connection.nodes) {
+      threads.push({
+        isResolved: node?.isResolved === true,
+        commentIds: (node?.comments?.nodes || []).map(comment => Number(comment?.databaseId)).filter(id => Number.isSafeInteger(id) && id > 0),
+      });
+    }
+    const next = connection.pageInfo?.endCursor;
+    if (!connection.pageInfo?.hasNextPage || typeof next !== 'string' || !next) break;
+    cursor = next;
+  }
+  return threads;
+}
 export async function fetchIssueTimeline({ repo, number, token, fetchImpl = fetch }) {
   const { base, request } = reader(repo, token, fetchImpl);
   return paginate(`${base}/issues/${issueNumber(number)}/timeline?per_page=100&page=1`, request, data => data);

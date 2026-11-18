@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { addAudit, listItems } from './db.js';
 import {
-  fetchIssueComments, fetchPullReviews, fetchPullReviewComments, fetchIssueTimeline, fetchIssueDetail,
+  fetchIssueComments, fetchPullReviews, fetchPullReviewComments, fetchPullReviewThreads, fetchIssueTimeline, fetchIssueDetail,
   fetchPullRequestDetail, fetchPullCheckRuns, fetchCommitStatuses, createIssueComment, rerunGitHubWorkflow, identityId, normalizeIssue,
 } from './integrations/github.js';
 import { getGitHubToken, deleteGitHubToken, markGitHubTokenVerified } from './github-tokens.js';
@@ -46,8 +46,9 @@ function upsertMessage(db, itemId, row) {
   const existing = row.remoteKey ? db.prepare('SELECT * FROM item_messages WHERE github_comment_id=?').get(row.remoteKey) : null;
   if (existing) {
     db.prepare(`UPDATE item_messages SET body=?,updated_at=?,url=?,path=?,line=?,state=?,remote_deleted=0,synced_at=?,
-      diff_hunk=COALESCE(?,diff_hunk),start_line=COALESCE(?,start_line),side=COALESCE(?,side) WHERE id=?`)
-      .run(row.body, row.updatedAt || row.createdAt, row.url || null, row.path || null, row.line ?? null, row.state || null, at, row.diffHunk || null, row.startLine ?? null, row.side || null, existing.id);
+      diff_hunk=COALESCE(?,diff_hunk),start_line=COALESCE(?,start_line),side=COALESCE(?,side),
+      thread_resolved=COALESCE(?,thread_resolved) WHERE id=?`)
+      .run(row.body, row.updatedAt || row.createdAt, row.url || null, row.path || null, row.line ?? null, row.state || null, at, row.diffHunk || null, row.startLine ?? null, row.side || null, row.threadResolved === undefined ? null : Number(row.threadResolved === true), existing.id);
     if (existing.source !== 'platform') {
       db.prepare(`UPDATE item_messages SET kind=?,author_member_id=COALESCE(author_member_id,?),author_login=?,author_github_id=?,author_avatar_url=? WHERE id=?`)
         .run(row.kind, memberId, author.login, author.githubId || null, author.avatarUrl || '', existing.id);
@@ -56,9 +57,9 @@ function upsertMessage(db, itemId, row) {
     return existing.id;
   }
   const id = randomUUID();
-  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,in_reply_to_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,path,line,state,delivery_status,remote_deleted,created_at,updated_at,synced_at,diff_hunk,start_line,side)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'synced',0,?,?,?,?,?,?)`)
-    .run(id, itemId, 'github', row.kind, row.remoteKey, row.inReplyTo || null, memberId, author.login, author.githubId || null, author.avatarUrl || '', row.body, row.url || null, row.path || null, row.line ?? null, row.state || null, row.createdAt, row.updatedAt || row.createdAt, at, row.diffHunk || null, row.startLine ?? null, row.side || null);
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,in_reply_to_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,path,line,state,delivery_status,remote_deleted,created_at,updated_at,synced_at,diff_hunk,start_line,side,thread_resolved)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'synced',0,?,?,?,?,?,?,?)`)
+    .run(id, itemId, 'github', row.kind, row.remoteKey, row.inReplyTo || null, memberId, author.login, author.githubId || null, author.avatarUrl || '', row.body, row.url || null, row.path || null, row.line ?? null, row.state || null, row.createdAt, row.updatedAt || row.createdAt, at, row.diffHunk || null, row.startLine ?? null, row.side || null, Number(row.threadResolved === true));
   syncMentions(db, id, row.body);
   return id;
 }
@@ -278,6 +279,15 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
     tasks.push(fetchPullReviewComments({ repo: config.repo, number: item.number, token, fetchImpl }));
   }
   const [comments, timeline, reviews = [], reviewComments = []] = await Promise.all(tasks);
+  // Resolution state is GraphQL-only and optional; a failure must not block sync.
+  const threadResolution = new Map();
+  if (item.kind === 'pr' && token) {
+    try {
+      for (const thread of await fetchPullReviewThreads({ repo: config.repo, number: item.number, token, fetchImpl })) {
+        for (const commentId of thread.commentIds) threadResolution.set(String(commentId), thread.isResolved);
+      }
+    } catch { /* resolution is best-effort; cached flags remain unchanged */ }
+  }
 
   let ciEvents = [];
   let headSha = item.headSha || null;
@@ -312,7 +322,12 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
   try {
     for (const comment of comments) { const row = commentRow(comment); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
     for (const review of reviews) { const row = reviewRow(review); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
-    for (const comment of reviewComments) { const row = reviewCommentRow(comment); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
+    for (const comment of reviewComments) {
+      const row = reviewCommentRow(comment);
+      const resolved = threadResolution.get(String(comment.id));
+      if (resolved !== undefined) row.threadResolved = resolved;
+      seen.add(row.remoteKey); upsertMessage(db, item.id, row);
+    }
     if (full) markRemoteDeleted(db, item.id, seen);
     for (const raw of timeline) {
       if (!categorizeTimeline(raw)) continue;
@@ -417,6 +432,7 @@ function messageView(db, row, memberId) {
     diffHunk: row.diff_hunk || null,
     reviewCommentId: typeof row.github_comment_id === 'string' && row.github_comment_id.startsWith('review_comment:') ? row.github_comment_id.slice('review_comment:'.length) : null,
     state: row.state,
+    threadResolved: !!row.thread_resolved,
     deliveryStatus: row.delivery_status, deliveryError: row.delivery_error,
     remoteDeleted: !!row.remote_deleted,
     mentions: mentions.map(mention => ({ ...mention, isSelf: mention.memberId === memberId })),

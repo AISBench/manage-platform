@@ -62,6 +62,35 @@ test('conversation sync stores comments, operation events, CI and mentions', asy
   assert.equal(inline.url, 'https://github.com/x/101#discussion_r4');
 });
 
+test('resolved review threads are stored and survive a failed GraphQL refresh', async t => {
+  const db = database(t);
+  const sha = 'c'.repeat(40);
+  insertItem(db, { ...testItem(), id: 'github:301', number: 301, kind: 'pr', headSha: sha });
+  let graphqlOk = true;
+  const fetchImpl = async (url, options = {}) => {
+    const target = String(url);
+    if (target.endsWith('/graphql')) {
+      assert.equal(options.method, 'POST');
+      if (!graphqlOk) return json({ errors: [{ message: 'unavailable' }] });
+      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ isResolved: true, comments: { nodes: [{ databaseId: 44 }] } }] } } } } });
+    }
+    if (target.includes('/issues/301/comments') || target.includes('/issues/301/timeline') || target.includes('/pulls/301/reviews')) return json([]);
+    if (target.includes('/pulls/301/comments')) return json([{ id: 44, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' }]);
+    if (target.includes('/pulls/301')) return json({ number: 301, state: 'open', head: { sha } });
+    if (target.includes('/check-runs')) return json({ check_runs: [] });
+    if (target.includes('/statuses')) return json([]);
+    return json([]);
+  };
+  await syncItemConversation(db, config(), 'github:301', { force: true, fetchImpl });
+  const resolved = listConversation(db, config(), 'github:301', 'missing-member').messages.find(message => message.kind === 'review_comment');
+  assert.equal(resolved.threadResolved, true, 'GraphQL resolution is mapped onto the inline comment');
+
+  graphqlOk = false;
+  await syncItemConversation(db, config(), 'github:301', { force: true, fetchImpl });
+  const cached = listConversation(db, config(), 'github:301', 'missing-member').messages.find(message => message.kind === 'review_comment');
+  assert.equal(cached.threadResolved, true, 'a failed refresh keeps the cached resolution flag');
+});
+
 test('conversation sync mirrors GitHub close, merge, reopen and label changes', async t => {
   const db = database(t);
   insertItem(db, { ...testItem(), id: 'github:201', number: 201, kind: 'pr', headSha: 'b'.repeat(40), labels: ['feature'] });

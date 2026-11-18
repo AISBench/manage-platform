@@ -56,14 +56,30 @@ function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, read
   const own = message.author.memberId && message.author.memberId === user.memberId;
   const mentionSelf = (message.mentions || []).some(mention => mention.isSelf);
   const long = message.body.length > LONG_CHARS || message.body.split('\n').length > LONG_LINES;
+  const resolvedThread = message.kind === 'review_comment' && message.threadResolved === true;
+  // Read messages and resolved review threads collapse to one scan-friendly line.
+  const foldable = resolvedThread || (message.readByMe && !mentionSelf);
+  if (foldable && !expanded) {
+    const snippet = String(message.body || '').replace(/\s+/g, ' ').trim().slice(0, 90);
+    return <article ref={elementRef} data-message-id={message.id} className={`message-card is-compact ${own ? 'is-own' : ''}`}>
+      <button type="button" className="message-compact" aria-expanded={false} onClick={() => onToggle(message.id)}>
+        <Avatar login={message.author.login} src={message.author.avatarUrl} size="tiny" />
+        <span className="compact-main">
+          <span className="compact-meta"><strong>{message.author.name || message.author.login}</strong>{resolvedThread && <Badge tone="purple">已解决的检视意见</Badge>}{message.readByMe && <Badge tone="neutral">已读</Badge>}{message.kind === 'review_comment' && !resolvedThread && <Badge tone="purple">行内评论</Badge>}<time dateTime={message.createdAt}>{date(message.createdAt, true)}</time></span>
+          <span className="compact-snippet">{snippet || '（无正文）'}</span>
+        </span>
+        <ChevronDown size={14} />
+      </button>
+    </article>;
+  }
   return <article ref={elementRef} data-message-id={message.id} className={`message-card ${own ? 'is-own' : ''} ${mentionSelf ? 'is-mention' : ''} ${message.deliveryStatus === 'failed' ? 'is-failed' : ''}`}>
     <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
     <div className="message-main">
-      <div className="message-meta"><strong>{message.author.name || message.author.login}</strong><span>@{message.author.login}</span><Badge tone={message.source === 'platform' ? 'teal' : 'neutral'}>{message.source === 'platform' ? (message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台') : 'GitHub'}</Badge>{message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}{message.kind === 'review_comment' && <Badge tone="purple">行内评论</Badge>}{mentionSelf && <Badge tone="amber">@你</Badge>}{message.remoteDeleted && <Badge tone="red">已删除</Badge>}<time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>{message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}</div>
+      <div className="message-meta"><strong>{message.author.name || message.author.login}</strong><span>@{message.author.login}</span><Badge tone={message.source === 'platform' ? 'teal' : 'neutral'}>{message.source === 'platform' ? (message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台') : 'GitHub'}</Badge>{message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}{message.kind === 'review_comment' && <Badge tone="purple">行内评论</Badge>}{resolvedThread && <Badge tone="purple">已解决</Badge>}{mentionSelf && <Badge tone="amber">@你</Badge>}{message.remoteDeleted && <Badge tone="red">已删除</Badge>}<time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>{message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}</div>
       {mentionSelf && <div className="message-mention-banner">有人在这条消息中提到了你</div>}
       {message.kind === 'review_comment' && <ReviewCode message={message} itemUrl={itemUrl} />}
       <div className={`message-body ${long && !expanded ? 'is-collapsed' : ''}`}><Markdown text={message.body || '（无正文）'} /></div>
-      {long && <button className="text-button message-expand" onClick={() => onToggle(message.id)}>{expanded ? <><ChevronUp size={13} />收起</> : <><ChevronDown size={13} />展开全文</>}</button>}
+      {(long || foldable) && <button className="text-button message-expand" onClick={() => onToggle(message.id)}>{expanded ? <><ChevronUp size={13} />收起</> : <><ChevronDown size={13} />{long ? '展开全文' : '展开'}</>}</button>}
       {message.deliveryStatus === 'failed' && <div className="message-failed"><CircleAlert size={14} /><span>{message.deliveryError === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权失效，请重新授权' : message.deliveryError === 'GITHUB_FORBIDDEN' ? '没有评论权限' : '同步到 GitHub 失败'}</span><button className="text-button" disabled={retrying} onClick={() => onRetry(message.id)}>{retrying ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}重试</button></div>}
       <div className="message-footer"><button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
       {reads?.messageId === message.id && <div className="read-list">{reads.loading ? <Spinner compact label="读取已读成员…" /> : reads.members?.length ? reads.members.map(member => <span key={member.memberId} className="read-member"><Avatar login={member.login} src={member.avatarUrl} size="tiny" />{member.displayName || member.login}</span>) : <span className="muted">还没有其他平台成员读过这条消息</span>}{reads.error && <ErrorBox compact error={reads.error} />}</div>}
