@@ -109,6 +109,39 @@ test('hourly digest batches several events into one Feishu message', async t => 
   assert.match(sent[0].text, /2\. \[新评论\]/);
 });
 
+test('background sync notifies administrators for newly discovered issues', async t => {
+  const db = openDatabase(':memory:'); t.after(() => db.close());
+  const admin = addTestMember(db, { githubId: '501', login: 'alice', role: 'admin' }); bindTestMember(db, admin.id);
+  setSetting(db, 'rules', { enabled: true, staleHours: 8760, reminderCooldownHours: 24 });
+  setSetting(db, 'lastSync', new Date(Date.now() - 60000).toISOString());
+  const now = new Date().toISOString();
+  const fresh = testItem({ id: 'github:679', number: 679, kind: 'issue', title: 'New issue', author: 'pudding-cha', authorId: '777', createdAt: now, updatedAt: now, url: `https://github.com/${REPO}/issues/679` });
+  const sent = [];
+  const services = createServices(db, configForTests(), { fetchItems: async () => [fresh], sendMessage: async message => { sent.push(message); return { messageId: 'mock' }; } });
+  await services.sync();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].openId, `ou_${admin.id}`);
+  assert.match(sent[0].title, /^\[新 Issue\]/);
+  assert.match(sent[0].text, /pudding-cha 创建了 Issue #679/);
+  const notice = db.prepare('SELECT event_type AS eventType,status FROM notifications').get();
+  assert.equal(notice.eventType, 'new_issue');
+  assert.equal(notice.status, 'sent');
+});
+
+test('first full sync establishes a baseline without notifying historical items', async t => {
+  const db = openDatabase(':memory:'); t.after(() => db.close());
+  const admin = addTestMember(db, { githubId: '501', login: 'alice', role: 'admin' }); bindTestMember(db, admin.id);
+  setSetting(db, 'rules', { enabled: true, staleHours: 8760, reminderCooldownHours: 24 });
+  const now = new Date().toISOString();
+  const historical = testItem({ id: 'github:680', number: 680, kind: 'issue', title: 'Historical', author: 'pudding-cha', authorId: '777', createdAt: now, updatedAt: now });
+  const sent = [];
+  const services = createServices(db, configForTests(), { fetchItems: async () => [historical], sendMessage: async message => { sent.push(message); return { messageId: 'mock' }; } });
+  await services.sync();
+  assert.equal(sent.length, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM items WHERE id='github:680'").get().n, 1);
+});
+
 test('polling conversation sync notifies new mentions without replaying history', async t => {
   const { db, bob, carol, services, sent } = fixture(t, { itemExtra: { kind: 'issue' } });
   const comment = (id, body, login = 'dave', type = 'User') => ({ id, body, user: { id: 777, login, type }, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), html_url: `https://github.com/${REPO}/issues/101#issuecomment-${id}` });

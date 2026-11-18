@@ -108,10 +108,12 @@ export function createServices(db,config,integrations={}) {
     const remoteKey=event==='issue_comment'&&payload.comment?.id?`comment:${payload.comment.id}`
       :event==='pull_request_review'&&payload.review?.id?`review:${payload.review.id}`
         :event==='pull_request_review_comment'&&payload.comment?.id?`review_comment:${payload.comment.id}`:null;
-    const put=(member,type,reason,detail={},rank=1)=>{
-      if(!member||member.status==='disabled'||String(member.github_user_id)===String(actorId)) return;
+    const put=(member,type,reason,detail={},rank=1,allowSelf=false)=>{
+      if(!member||member.status==='disabled'||(!allowSelf&&String(member.github_user_id)===String(actorId))) return;
       const current=result.get(member.id);
-      if(!current||rank>current.rank) result.set(member.id,{member,type,reason,detail,rank,key:remoteKey?`msg:${item.id}:${remoteKey}:${member.id}`:null});
+      const key=remoteKey?`msg:${item.id}:${remoteKey}:${member.id}`
+        :(type==='new_issue'||type==='new_pr')?`item-new:${item.id}:${member.id}`:null;
+      if(!current||rank>current.rank) result.set(member.id,{member,type,reason,detail,rank,key});
     };
     const mentions=(body,rank=5)=>{
       for(const login of mentionLogins(body)) {
@@ -126,7 +128,10 @@ export function createServices(db,config,integrations={}) {
       const type=event==='pull_request'?'new_pr':'new_issue',targets=new Map();
       for(const admin of db.prepare("SELECT * FROM members WHERE role='admin' AND status='active'").all()) targets.set(admin.id,admin);
       for(const member of watcherMembers(item).values()) targets.set(member.id,member);
-      for(const member of targets.values()) put(member,type,`${actor} 创建了 ${KIND(item)} #${item.number}`,{url:item.url,actor:sender.login||''},1);
+      for(const member of targets.values()) {
+        const admin=member.role==='admin';
+        put(member,type,`${actor} 创建了 ${KIND(item)} #${item.number}`,{url:item.url,actor:sender.login||''},1,admin);
+      }
     } else if((event==='issues'||event==='pull_request')&&action==='assigned'&&payload.assignee) {
       const member=memberByGithubId(payload.assignee.id)||memberByLogin(payload.assignee.login);
       put(member,'assigned',`${actor} 将 ${KIND(item)} #${item.number} 指派给你`,{url:item.url,assignee:payload.assignee.login||''},4);
@@ -229,6 +234,7 @@ export function createServices(db,config,integrations={}) {
     if (config.demo) {publicPortal.demoProjection();return {count:items().length,lastSync:getSetting(db,'lastSync')};}
     const next=Date.parse(getSetting(db,'nextSyncAllowedAt','') || '');
     if (Number.isFinite(next)&&next>Date.now()) throw Object.assign(new Error('GitHub 接口正在退避，请稍后重试'),{status:429});
+    const hadBaseline=!!getSetting(db,'lastSync'),newItems=[];
     try {
       const publication=await publicPortal.beginProjection();
       const snapshot=await fetchItems({repo:config.repo,token:config.githubToken});
@@ -242,7 +248,7 @@ export function createServices(db,config,integrations={}) {
         if(labelSnapshot) syncRepositoryLabels(db,labelSnapshot);
         for (const item of snapshot) {
           const old=db.prepare('SELECT * FROM items WHERE id=?').get(item.id);
-          if (!old) db.prepare('INSERT INTO items(id,number,data,repository_id) VALUES (?,?,?,?)').run(item.id,item.number,JSON.stringify(item),config.repo);
+          if (!old) {newItems.push(item);db.prepare('INSERT INTO items(id,number,data,repository_id) VALUES (?,?,?,?)').run(item.id,item.number,JSON.stringify(item),config.repo);}
           else {
             const reopened=JSON.parse(old.data).state==='closed'&&item.state==='open'&&old.workflow==='done';
             db.prepare('UPDATE items SET data=?,repository_id=?,needs_review=CASE WHEN ? THEN 1 ELSE needs_review END,version=version+CASE WHEN data<>? THEN 1 ELSE 0 END WHERE id=?').run(JSON.stringify(item),config.repo,Number(reopened),JSON.stringify(item),item.id);
@@ -251,6 +257,17 @@ export function createServices(db,config,integrations={}) {
         publicPortal.commitProjection(publicSnapshot);
         const lastSync=nowISO();setSetting(db,'lastSync',lastSync);setSetting(db,'syncError',null);setSetting(db,'nextSyncAllowedAt',null);
         addActivity(db,'GitHub 同步完成',`同步 ${snapshot.length} 条 PR / Issue，保留平台处理字段。`);db.exec('COMMIT');
+        if(hadBaseline&&newItems.length&&getSetting(db,'rules').enabled) {
+          try {
+            for(const item of newItems) {
+              const payload={action:'opened',sender:{id:item.authorId,login:item.author},[item.kind==='pr'?'pull_request':'issue']:{number:item.number}};
+              for(const notice of eventNotifications(item,payload,item.kind==='pr'?'pull_request':'issues',null)) {
+                enqueue(item,notice.member,{type:notice.type,reason:notice.reason,key:notice.key||`item-new:${item.id}:${notice.member.id}`,detail:notice.detail});
+              }
+            }
+            await runReminders();
+          } catch { /* notification delivery must not mark the data sync as failed */ }
+        }
         return {count:snapshot.length,lastSync};
       } catch(error) {db.exec('ROLLBACK');throw error;}
     } catch(error) {
