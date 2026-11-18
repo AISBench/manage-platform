@@ -218,8 +218,32 @@ export async function fetchPullReviewComments({ repo, number, token, fetchImpl =
   const { base, request } = reader(repo, token, fetchImpl);
   return paginate(`${base}/pulls/${issueNumber(number)}/comments?per_page=100&page=1`, request, data => data);
 }
-// REST never exposes whether a review thread is resolved; GraphQL is the only
-// source, so the resolution flag is mapped onto the comment database ids.
+// REST never exposes whether a review thread is resolved or its node id;
+// GraphQL is the only source, so both are mapped onto the comment database ids.
+async function reviewThreadGraphql({ token, query, variables, fetchImpl, errorMessage }) {
+  const headers = {
+    Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
+    'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}`,
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  let response;
+  try {
+    response = await fetchImpl('https://api.github.com/graphql', {
+      method: 'POST', headers, body: JSON.stringify({ query, variables }),
+      redirect: 'error', signal: controller.signal,
+    });
+  } catch {
+    throw new IntegrationError(errorMessage);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response?.ok) throw new IntegrationError(errorMessage, response?.status);
+  let payload;
+  try { payload = await response.json(); } catch { throw new IntegrationError(errorMessage); }
+  if (Array.isArray(payload?.errors) && payload.errors.length) throw new IntegrationError(errorMessage);
+  return payload;
+}
 export async function fetchPullReviewThreads({ repo, number, token, fetchImpl = fetch }) {
   repoBase(repo);
   if (!token) return [];
@@ -227,36 +251,20 @@ export async function fetchPullReviewThreads({ repo, number, token, fetchImpl = 
   const query = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){
     repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){
       pageInfo{hasNextPage endCursor}
-      nodes{isResolved comments(first:100){nodes{databaseId}}}
+      nodes{id isResolved comments(first:100){nodes{databaseId}}}
     }}}}`;
-  const headers = {
-    Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
-    'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}`,
-  };
   const threads = [];
   let cursor = null;
   for (let page = 0; page < 10; page += 1) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
-    let response;
-    try {
-      response = await fetchImpl('https://api.github.com/graphql', {
-        method: 'POST', headers, body: JSON.stringify({ query, variables: { owner, name, number: issueNumber(number), cursor } }),
-        redirect: 'error', signal: controller.signal,
-      });
-    } catch {
-      throw new IntegrationError('GitHub review thread request failed');
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!response?.ok) throw new IntegrationError('GitHub review thread request failed', response?.status);
-    let payload;
-    try { payload = await response.json(); } catch { throw new IntegrationError('GitHub returned invalid review thread data'); }
-    if (Array.isArray(payload?.errors) && payload.errors.length) throw new IntegrationError('GitHub returned invalid review thread data');
+    const payload = await reviewThreadGraphql({
+      token, query, variables: { owner, name, number: issueNumber(number), cursor }, fetchImpl,
+      errorMessage: 'GitHub review thread request failed',
+    });
     const connection = payload?.data?.repository?.pullRequest?.reviewThreads;
     if (!connection || !Array.isArray(connection.nodes)) throw new IntegrationError('GitHub returned invalid review thread data');
     for (const node of connection.nodes) {
       threads.push({
+        id: typeof node?.id === 'string' ? node.id : '',
         isResolved: node?.isResolved === true,
         commentIds: (node?.comments?.nodes || []).map(comment => Number(comment?.databaseId)).filter(id => Number.isSafeInteger(id) && id > 0),
       });
@@ -266,6 +274,20 @@ export async function fetchPullReviewThreads({ repo, number, token, fetchImpl = 
     cursor = next;
   }
   return threads;
+}
+// Resolving writes to GitHub as the member, so GitHub's own permission model
+// decides whether the platform member may resolve this thread.
+export async function resolveReviewThread({ threadId, token, fetchImpl = fetch }) {
+  const id = requiredString(threadId, 'review thread id');
+  requiredString(token, 'GitHub write token');
+  const payload = await reviewThreadGraphql({
+    token, fetchImpl, errorMessage: 'GitHub review thread update failed',
+    query: `mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread{ id isResolved } } }`,
+    variables: { threadId: id },
+  });
+  const thread = payload?.data?.resolveReviewThread?.thread;
+  if (!thread || thread.id !== id) throw new IntegrationError('GitHub returned invalid review thread data');
+  return { id: thread.id, isResolved: thread.isResolved === true };
 }
 export async function fetchIssueTimeline({ repo, number, token, fetchImpl = fetch }) {
   const { base, request } = reader(repo, token, fetchImpl);

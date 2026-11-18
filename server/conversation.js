@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { addAudit, listItems } from './db.js';
 import {
-  fetchIssueComments, fetchPullReviews, fetchPullReviewComments, fetchPullReviewThreads, fetchIssueTimeline, fetchIssueDetail,
+  fetchIssueComments, fetchPullReviews, fetchPullReviewComments, fetchPullReviewThreads, resolveReviewThread, fetchIssueTimeline, fetchIssueDetail,
   fetchPullRequestDetail, fetchPullCheckRuns, fetchCommitStatuses, createIssueComment, rerunGitHubWorkflow, identityId, normalizeIssue,
 } from './integrations/github.js';
 import { getGitHubToken, deleteGitHubToken, markGitHubTokenVerified } from './github-tokens.js';
@@ -47,8 +47,8 @@ function upsertMessage(db, itemId, row) {
   if (existing) {
     db.prepare(`UPDATE item_messages SET body=?,updated_at=?,url=?,path=?,line=?,state=?,remote_deleted=0,synced_at=?,
       diff_hunk=COALESCE(?,diff_hunk),start_line=COALESCE(?,start_line),side=COALESCE(?,side),
-      thread_resolved=COALESCE(?,thread_resolved) WHERE id=?`)
-      .run(row.body, row.updatedAt || row.createdAt, row.url || null, row.path || null, row.line ?? null, row.state || null, at, row.diffHunk || null, row.startLine ?? null, row.side || null, row.threadResolved === undefined ? null : Number(row.threadResolved === true), existing.id);
+      thread_resolved=COALESCE(?,thread_resolved),thread_id=COALESCE(?,thread_id) WHERE id=?`)
+      .run(row.body, row.updatedAt || row.createdAt, row.url || null, row.path || null, row.line ?? null, row.state || null, at, row.diffHunk || null, row.startLine ?? null, row.side || null, row.threadResolved === undefined ? null : Number(row.threadResolved === true), row.threadId || null, existing.id);
     if (existing.source !== 'platform') {
       db.prepare(`UPDATE item_messages SET kind=?,author_member_id=COALESCE(author_member_id,?),author_login=?,author_github_id=?,author_avatar_url=? WHERE id=?`)
         .run(row.kind, memberId, author.login, author.githubId || null, author.avatarUrl || '', existing.id);
@@ -57,9 +57,9 @@ function upsertMessage(db, itemId, row) {
     return existing.id;
   }
   const id = randomUUID();
-  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,in_reply_to_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,path,line,state,delivery_status,remote_deleted,created_at,updated_at,synced_at,diff_hunk,start_line,side,thread_resolved)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'synced',0,?,?,?,?,?,?,?)`)
-    .run(id, itemId, 'github', row.kind, row.remoteKey, row.inReplyTo || null, memberId, author.login, author.githubId || null, author.avatarUrl || '', row.body, row.url || null, row.path || null, row.line ?? null, row.state || null, row.createdAt, row.updatedAt || row.createdAt, at, row.diffHunk || null, row.startLine ?? null, row.side || null, Number(row.threadResolved === true));
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,in_reply_to_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,path,line,state,delivery_status,remote_deleted,created_at,updated_at,synced_at,diff_hunk,start_line,side,thread_resolved,thread_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'synced',0,?,?,?,?,?,?,?,?)`)
+    .run(id, itemId, 'github', row.kind, row.remoteKey, row.inReplyTo || null, memberId, author.login, author.githubId || null, author.avatarUrl || '', row.body, row.url || null, row.path || null, row.line ?? null, row.state || null, row.createdAt, row.updatedAt || row.createdAt, at, row.diffHunk || null, row.startLine ?? null, row.side || null, Number(row.threadResolved === true), row.threadId || null);
   syncMentions(db, id, row.body);
   return id;
 }
@@ -284,7 +284,7 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
   if (item.kind === 'pr' && token) {
     try {
       for (const thread of await fetchPullReviewThreads({ repo: config.repo, number: item.number, token, fetchImpl })) {
-        for (const commentId of thread.commentIds) threadResolution.set(String(commentId), thread.isResolved);
+        for (const commentId of thread.commentIds) threadResolution.set(String(commentId), { threadId: thread.id, isResolved: thread.isResolved });
       }
     } catch { /* resolution is best-effort; cached flags remain unchanged */ }
   }
@@ -324,8 +324,8 @@ export async function syncItemConversation(db, config, itemId, { force = false, 
     for (const review of reviews) { const row = reviewRow(review); seen.add(row.remoteKey); upsertMessage(db, item.id, row); }
     for (const comment of reviewComments) {
       const row = reviewCommentRow(comment);
-      const resolved = threadResolution.get(String(comment.id));
-      if (resolved !== undefined) row.threadResolved = resolved;
+      const resolution = threadResolution.get(String(comment.id));
+      if (resolution) { row.threadResolved = resolution.isResolved; row.threadId = resolution.threadId; }
       seen.add(row.remoteKey); upsertMessage(db, item.id, row);
     }
     if (full) markRemoteDeleted(db, item.id, seen);
@@ -433,6 +433,7 @@ function messageView(db, row, memberId) {
     reviewCommentId: typeof row.github_comment_id === 'string' && row.github_comment_id.startsWith('review_comment:') ? row.github_comment_id.slice('review_comment:'.length) : null,
     state: row.state,
     threadResolved: !!row.thread_resolved,
+    canResolve: row.kind === 'review_comment' && !!row.thread_id && !row.thread_resolved,
     deliveryStatus: row.delivery_status, deliveryError: row.delivery_error,
     remoteDeleted: !!row.remote_deleted,
     mentions: mentions.map(mention => ({ ...mention, isSelf: mention.memberId === memberId })),
@@ -517,6 +518,42 @@ export async function retryPlatformMessage(db, config, { member, itemId, message
   if (row.delivery_status !== 'failed' || row.github_comment_id) throw fail(409, '该消息不需要重试', 'NOT_RETRYABLE');
   db.prepare('DELETE FROM item_messages WHERE id=?').run(messageId);
   return postPlatformMessage(db, config, { member, itemId, body: row.body, clientId: row.client_id, fetchImpl });
+}
+
+const RESOLVE_MESSAGES = {
+  GITHUB_TOKEN_INVALID: 'GitHub 授权已失效，请重新授权',
+  GITHUB_FORBIDDEN: '没有将该检视意见标记为已解决的 GitHub 权限',
+  GITHUB_REVIEW_THREAD_NOT_FOUND: '检视线程不存在或已删除，请先刷新同步',
+  GITHUB_RATE_LIMITED: 'GitHub 接口限流，请稍后重试',
+  GITHUB_UNAVAILABLE: 'GitHub 检视线程更新失败，请稍后重试',
+};
+
+// Resolve as the member so GitHub's own permissions decide who may resolve.
+export async function resolveItemReviewThread(db, config, { member, itemId, messageId, fetchImpl = fetch }) {
+  const row = getMessage(db, itemId, messageId);
+  if (!row || row.kind !== 'review_comment') throw fail(404, '检视意见不存在', 'NOT_FOUND');
+  if (row.thread_resolved) return { ok: true, alreadyResolved: true };
+  if (config.demo) return { ok: true, demo: true };
+  if (!row.thread_id) throw fail(409, '缺少 GitHub 检视线程信息，请先刷新同步', 'REVIEW_THREAD_MISSING');
+  const authUrl = `/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${encodeURIComponent(itemId)}` })}`;
+  const token = getGitHubToken(db, member.id, config);
+  if (!token) throw Object.assign(fail(409, '需要授权 GitHub 写权限', 'GITHUB_WRITE_AUTH_REQUIRED'), { authUrl });
+  try {
+    await resolveReviewThread({ threadId: row.thread_id, token, fetchImpl });
+  } catch (error) {
+    const code = error.status === 401 ? 'GITHUB_TOKEN_INVALID'
+      : error.status === 403 ? 'GITHUB_FORBIDDEN'
+        : error.status === 404 ? 'GITHUB_REVIEW_THREAD_NOT_FOUND'
+          : error.status === 429 ? 'GITHUB_RATE_LIMITED' : 'GITHUB_UNAVAILABLE';
+    if (code === 'GITHUB_TOKEN_INVALID') deleteGitHubToken(db, member.id);
+    const status = code === 'GITHUB_TOKEN_INVALID' ? 409 : code === 'GITHUB_FORBIDDEN' ? 403
+      : code === 'GITHUB_REVIEW_THREAD_NOT_FOUND' ? 404 : code === 'GITHUB_RATE_LIMITED' ? 429 : 502;
+    throw Object.assign(fail(status, RESOLVE_MESSAGES[code], code), code === 'GITHUB_TOKEN_INVALID' ? { authUrl } : { retryAt: error.retryAt });
+  }
+  markGitHubTokenVerified(db, member.id);
+  db.prepare('UPDATE item_messages SET thread_resolved=1,synced_at=? WHERE item_id=? AND thread_id=?').run(now(), itemId, row.thread_id);
+  addAudit(db, { actorId: member.id, action: 'review.resolve', targetType: 'item', targetId: itemId, after: { messageId, threadId: row.thread_id } });
+  return { ok: true };
 }
 
 const RERUN_MESSAGES = {

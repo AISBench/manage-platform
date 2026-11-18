@@ -15,7 +15,7 @@ import { requestJson } from './integrations/http.js';
 import { autoProvisionMemberInTransaction, githubAvatar, getMemberView, listMemberViews, updateMember, setMemberStatus } from './members.js';
 import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
 import { saveGitHubToken, deleteGitHubToken } from './github-tokens.js';
-import { listConversation, syncItemConversation, postPlatformMessage, retryPlatformMessage, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto } from './conversation.js';
+import { listConversation, syncItemConversation, postPlatformMessage, retryPlatformMessage, resolveItemReviewThread, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto } from './conversation.js';
 import { listLabels, labelWriteAccess, updateItemLabels, hasLabel } from './labels.js';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status});
@@ -285,6 +285,11 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     fresh(req);z.object({}).strict().parse(req.body);
     const row=await retryPlatformMessage(db,config,{member:req.member,itemId:req.params.id,messageId:req.params.messageId,fetchImpl});
     res.json({message:messageDto(db,row,req.member.id)});
+  });
+  app.post('/api/items/:id/messages/:messageId/resolve',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`review-resolve:${req.member.id}`}),async(req,res)=>{
+    fresh(req);z.object({}).strict().parse(req.body);
+    const result=await resolveItemReviewThread(db,config,{member:req.member,itemId:req.params.id,messageId:req.params.messageId,fetchImpl});
+    res.json({...result,conversation:listConversation(db,config,req.params.id,req.member.id)});
   });
   app.post('/api/items/:id/ci/:eventId/rerun',rateLimit({windowMs:60000,limit:6,keyGenerator:req=>`ci-rerun:${req.member.id}`}),async(req,res)=>{
     fresh(req);z.object({}).strict().parse(req.body);

@@ -4,7 +4,7 @@ import { openDatabase } from '../server/db.js';
 import { addTestMember, insertItem, testItem } from './helpers.js';
 import {
   mentionLogins, categorizeTimeline, syncItemConversation, listConversation, unreadSummary, recordReads, readsForMessage,
-  postPlatformMessage, upsertFromWebhook, dedupeStoredCI, rerunItemCI,
+  postPlatformMessage, upsertFromWebhook, dedupeStoredCI, rerunItemCI, resolveItemReviewThread,
 } from '../server/conversation.js';
 import { encryptToken, decryptToken, saveGitHubToken, getGitHubToken, deleteGitHubToken, githubTokenStatus } from '../server/github-tokens.js';
 
@@ -72,7 +72,7 @@ test('resolved review threads are stored and survive a failed GraphQL refresh', 
     if (target.endsWith('/graphql')) {
       assert.equal(options.method, 'POST');
       if (!graphqlOk) return json({ errors: [{ message: 'unavailable' }] });
-      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ isResolved: true, comments: { nodes: [{ databaseId: 44 }] } }] } } } } });
+      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'PRT_301', isResolved: true, comments: { nodes: [{ databaseId: 44 }] } }] } } } } });
     }
     if (target.includes('/issues/301/comments') || target.includes('/issues/301/timeline') || target.includes('/pulls/301/reviews')) return json([]);
     if (target.includes('/pulls/301/comments')) return json([{ id: 44, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' }]);
@@ -89,6 +89,69 @@ test('resolved review threads are stored and survive a failed GraphQL refresh', 
   await syncItemConversation(db, config(), 'github:301', { force: true, fetchImpl });
   const cached = listConversation(db, config(), 'github:301', 'missing-member').messages.find(message => message.kind === 'review_comment');
   assert.equal(cached.threadResolved, true, 'a failed refresh keeps the cached resolution flag');
+  assert.equal(cached.canResolve, false, 'resolved threads are no longer resolvable');
+});
+
+test('unresolved review threads resolve on GitHub as the member', async t => {
+  const db = database(t);
+  const member = addTestMember(db, { githubId: '999', login: 'alice', status: 'active' });
+  const sha = 'e'.repeat(40);
+  insertItem(db, { ...testItem(), id: 'github:302', number: 302, kind: 'pr', headSha: sha });
+  let mutation = null;
+  const fetchImpl = async (url, options = {}) => {
+    const target = String(url);
+    if (target.endsWith('/graphql')) {
+      const payload = JSON.parse(options.body);
+      if (/mutation/.test(payload.query)) {
+        mutation = payload;
+        return json({ data: { resolveReviewThread: { thread: { id: payload.variables.threadId, isResolved: true } } } });
+      }
+      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'PRT_302', isResolved: false, comments: { nodes: [{ databaseId: 77 }] } }] } } } } });
+    }
+    if (target.includes('/issues/302/comments') || target.includes('/issues/302/timeline') || target.includes('/pulls/302/reviews')) return json([]);
+    if (target.includes('/pulls/302/comments')) return json([{ id: 77, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' }]);
+    if (target.includes('/pulls/302')) return json({ number: 302, state: 'open', head: { sha } });
+    if (target.includes('/check-runs')) return json({ check_runs: [] });
+    if (target.includes('/statuses')) return json([]);
+    return json([]);
+  };
+  await syncItemConversation(db, config(), 'github:302', { force: true, fetchImpl });
+  const comment = listConversation(db, config(), 'github:302', member.id).messages.find(message => message.kind === 'review_comment');
+  assert.equal(comment.canResolve, true, 'unresolved threads expose the resolve action');
+  assert.equal(comment.threadResolved, false);
+
+  await assert.rejects(
+    () => resolveItemReviewThread(db, config(), { member, itemId: 'github:302', messageId: comment.id, fetchImpl }),
+    error => error.code === 'GITHUB_WRITE_AUTH_REQUIRED' && !!error.authUrl,
+  );
+
+  saveGitHubToken(db, { memberId: member.id, login: 'alice', githubUserId: '999', token: 'write-token', scopes: 'read:user public_repo' }, config());
+  const result = await resolveItemReviewThread(db, config(), { member, itemId: 'github:302', messageId: comment.id, fetchImpl });
+  assert.equal(result.ok, true);
+  assert.equal(mutation.variables.threadId, 'PRT_302');
+  assert.match(mutation.query, /resolveReviewThread/);
+  assert.equal(db.prepare('SELECT thread_resolved FROM item_messages WHERE id=?').get(comment.id).thread_resolved, 1);
+  const resolved = listConversation(db, config(), 'github:302', member.id).messages.find(message => message.id === comment.id);
+  assert.equal(resolved.threadResolved, true);
+  assert.equal(resolved.canResolve, false);
+  assert.ok(db.prepare("SELECT 1 FROM audit_logs WHERE action='review.resolve'").get());
+
+  const again = await resolveItemReviewThread(db, config(), {
+    member, itemId: 'github:302', messageId: comment.id,
+    fetchImpl: async () => { throw new Error('must not call GitHub'); },
+  });
+  assert.equal(again.alreadyResolved, true, 'resolving twice is idempotent');
+
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_login,body,thread_id,created_at,updated_at,synced_at)
+    VALUES ('message-302-b','github:302','github','review_comment','review_comment:78','bob','other nit','PRT_303','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`).run();
+  await assert.rejects(
+    () => resolveItemReviewThread(db, config(), {
+      member, itemId: 'github:302', messageId: 'message-302-b',
+      fetchImpl: async () => new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403, headers: { 'Content-Type': 'application/json' } }),
+    }),
+    error => error.code === 'GITHUB_FORBIDDEN' && error.status === 403,
+  );
+  assert.equal(db.prepare("SELECT thread_resolved FROM item_messages WHERE id='message-302-b'").get().thread_resolved, 0);
 });
 
 test('conversation sync mirrors GitHub close, merge, reopen and label changes', async t => {

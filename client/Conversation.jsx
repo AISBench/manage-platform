@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, CircleAlert, ExternalLink, Eye, LoaderCircle, MessageCircle, RefreshCw, Send } from 'lucide-react';
+import { CheckCheck, ChevronDown, ChevronUp, CircleAlert, ExternalLink, Eye, LoaderCircle, MessageCircle, RefreshCw, Send } from 'lucide-react';
 import { api } from './api.js';
 import { Avatar, Badge, ErrorBox, Spinner, date } from './ui.jsx';
 import Markdown from './Markdown.jsx';
@@ -51,7 +51,7 @@ function ReviewCode({ message, itemUrl }) {
   </div>;
 }
 
-function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying }) {
+function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying, canWrite, onResolve, resolving }) {
   const elementRef = useRef(null);
   const own = message.author.memberId && message.author.memberId === user.memberId;
   const mentionSelf = (message.mentions || []).some(mention => mention.isSelf);
@@ -70,6 +70,7 @@ function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, read
         </span>
         <ChevronDown size={14} />
       </button>
+      {message.canResolve && canWrite && <button type="button" className="text-button compact-resolve" disabled={resolving} title="在 GitHub 中将该检视线程标记为已解决" onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}解决</button>}
     </article>;
   }
   return <article ref={elementRef} data-message-id={message.id} className={`message-card ${own ? 'is-own' : ''} ${mentionSelf ? 'is-mention' : ''} ${message.deliveryStatus === 'failed' ? 'is-failed' : ''}`}>
@@ -80,7 +81,7 @@ function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, read
       {message.kind === 'review_comment' && <ReviewCode message={message} itemUrl={itemUrl} />}
       <div className={`message-body ${long && !expanded ? 'is-collapsed' : ''}`}><Markdown text={message.body || '（无正文）'} /></div>
       {message.deliveryStatus === 'failed' && <div className="message-failed"><CircleAlert size={14} /><span>{message.deliveryError === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权失效，请重新授权' : message.deliveryError === 'GITHUB_FORBIDDEN' ? '没有评论权限' : '同步到 GitHub 失败'}</span><button className="text-button" disabled={retrying} onClick={() => onRetry(message.id)}>{retrying ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}重试</button></div>}
-      <div className="message-footer"><button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
+      <div className="message-footer">{message.canResolve && canWrite && <button type="button" className="text-button message-resolve" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button>}<button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
       {reads?.messageId === message.id && <div className="read-list">{reads.loading ? <Spinner compact label="读取已读成员…" /> : reads.members?.length ? reads.members.map(member => <span key={member.memberId} className="read-member"><Avatar login={member.login} src={member.avatarUrl} size="tiny" />{member.displayName || member.login}</span>) : <span className="muted">还没有其他平台成员读过这条消息</span>}{reads.error && <ErrorBox compact error={reads.error} />}</div>}
     </div>
   </article>;
@@ -94,6 +95,7 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   const [expanded, setExpanded] = useState(new Set());
   const [reads, setReads] = useState(null);
   const [retrying, setRetrying] = useState('');
+  const [resolving, setResolving] = useState('');
   const pendingReads = useRef(new Set());
   const observer = useRef(null);
   const flushTimer = useRef(null);
@@ -146,6 +148,15 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     try { await api(`/api/items/${encodeURIComponent(itemId)}/messages/${encodeURIComponent(messageId)}/retry`, { method: 'POST', body: {} }); notify?.('已重新同步到 GitHub'); await reload({ refresh: true }); }
     catch (e) { setSendError(e); } finally { setRetrying(''); }
   }
+  async function resolveThread(messageId) {
+    setResolving(messageId);
+    try {
+      const result = await api(`/api/items/${encodeURIComponent(itemId)}/messages/${encodeURIComponent(messageId)}/resolve`, { method: 'POST', body: {} });
+      notify?.(result.demo ? '演示模式：已标记为已解决' : '已在 GitHub 中标记为已解决');
+      await reload({ refresh: false });
+    } catch (e) { notify?.(e.message || '标记已解决失败', 'error'); }
+    finally { setResolving(''); }
+  }
   const unread = data?.unread?.unread || 0;
   return <section className="conversation-panel">
     <div className="conversation-head"><div><h2><MessageCircle size={17} />对话</h2><p>最新消息在前 · 平台发言以你的 GitHub 身份同步</p></div><Badge tone={unread ? 'amber' : 'neutral'}>{unread ? `${unread} 条未读` : '已读'}{data?.unread?.mentions ? ` · @我 ${data.unread.mentions}` : ''}</Badge></div>
@@ -158,7 +169,7 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     </form>
     {error ? <ErrorBox error={error} retry={() => reload({ refresh: true })} /> : loading && !data ? <Spinner label="正在读取对话…" /> : <>
       {unread > 0 && <div className="unread-banner">有 {unread} 条未读消息{data.unread.mentions ? `，其中 ${data.unread.mentions} 条 @你` : ''}</div>}
-      <div className="message-list">{messages.length ? messages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} />) : <div className="conversation-empty">还没有评论，发送第一条消息吧。</div>}</div>
+      <div className="message-list">{messages.length ? messages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />) : <div className="conversation-empty">还没有评论，发送第一条消息吧。</div>}</div>
       {messages.length >= 50 && <button className="btn btn-secondary btn-small conversation-more" onClick={onLoadOlder}>加载更早消息</button>}
     </>}
   </section>;
