@@ -367,6 +367,11 @@ function ensureBaseline(db, memberId) {
   return at;
 }
 
+// GitHub records one review per inline-comment submission; these empty
+// COMMENTED reviews carry no content beyond the threads already shown, so they
+// are hidden from the conversation and unread counts.
+const HIDE_EMPTY_REVIEW = "NOT (m.kind='review' AND m.state='COMMENTED' AND TRIM(m.body)='')";
+
 export function unreadSummary(db, memberId) {
   const baseline = ensureBaseline(db, memberId);
   const member = db.prepare('SELECT github_user_id FROM members WHERE id=?').get(memberId);
@@ -378,6 +383,7 @@ export function unreadSummary(db, memberId) {
     FROM item_messages m
     LEFT JOIN item_read_state rs ON rs.item_id=m.item_id AND rs.member_id=?
     WHERE m.remote_deleted=0
+      AND ${HIDE_EMPTY_REVIEW}
       AND (m.author_member_id IS NULL OR m.author_member_id<>?)
       AND (m.author_github_id IS NULL OR m.author_github_id<>?)
       AND m.created_at > COALESCE(rs.last_read_at, ?)
@@ -447,7 +453,7 @@ export function listConversation(db, config, itemId, memberId, { before = '', li
   const item = itemRow(db, itemId);
   const size = Math.min(Math.max(Number(limit) || 50, 1), 100);
   const params = [item.id];
-  let where = 'm.item_id=?';
+  let where = `m.item_id=? AND ${HIDE_EMPTY_REVIEW}`;
   if (before) { where += ' AND m.created_at<?'; params.push(before); }
   const rows = db.prepare(`SELECT m.*,mem.display_name AS member_name,mem.github_login AS member_login,mem.avatar_url AS member_avatar
     FROM item_messages m LEFT JOIN members mem ON mem.id=m.author_member_id
