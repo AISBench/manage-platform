@@ -108,6 +108,8 @@ docker compose exec platform node server/cli.js backup --output /app/data/backup
 | 成员无法接收飞书 | 是否本人绑定当前 App ID、是否测试确认、通知开关 / 免打扰、成员状态、应用发布 / 可用范围 / 权限 |
 | 个人机器人保存失败 | Webhook 是否为 `https://open.feishu.cn` 或 `https://open.larksuite.com` 的 `/open-apis/bot/v2/hook/...` 地址；服务端是否配置 `TOKEN_ENCRYPTION_KEY`；是否因成员停用或替换地址导致绑定版本变化 |
 | 个人机器人测试消息未到达 | 机器人是否仍在群内、地址是否被重置、群是否限制了机器人发言；重新保存并测试，管理员只能看到主机和状态，不能读取完整地址 |
+| 实时提醒没有到达 | 成员是否选择“每小时 / 每日汇总”；汇总消息会等到整点或指定时间；查看通知记录的 `nextAt` 与 `eventType` |
+| GitHub 评论 / CI / 状态没有通知 | 目标仓库是否配置了签名 Webhook；没有 Webhook 时评论与 CI 只能靠轮询同步，不会产生即时事件通知 |
 | 提示未授权 GitHub 评论写权限，或授权后仍回到工作区 | 服务端是否配置 32 字节 base64 的 `TOKEN_ENCRYPTION_KEY`，或 `DATA_DIR/token-encryption.key` 是否可读写；启动日志是否有对应警告；`GITHUB_OAUTH_SCOPE` 是否含 `public_repo`（私有仓库用 `repo`）；修改 scope 后需撤销授权并重新登录 |
 | 已启用成员仍不可达 | 停用保留关联但撤销验证，需要本人重新测试；换 App ID 需要重新绑定 |
 | 绑定或测试冲突 | 期间发生解绑、重绑、会话切换或停用；旧操作被拒绝是保护机制，重新发起当前操作 |
