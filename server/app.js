@@ -266,7 +266,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const query=z.object({before:z.string().max(50).optional(),limit:z.coerce.number().int().min(1).max(100).default(50),refresh:z.enum(['0','1']).default('0')}).strict().parse(req.query);
     let syncError=null;
     if(query.refresh==='1') {
-      try { await syncItemConversation(db,config,req.params.id,{fetchImpl}); }
+      try { const result=await syncItemConversation(db,config,req.params.id,{fetchImpl}); if(result.newMessages?.length) services.notifyConversationMessages(result.item,result.newMessages); }
       catch(error) { if(error.status===404) throw error; syncError=error.code || error.message; }
     }
     res.json({...listConversation(db,config,req.params.id,req.member.id,{before:query.before || '',limit:query.limit}),syncError});
@@ -274,6 +274,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.post('/api/items/:id/conversation/sync',rateLimit({windowMs:60000,limit:6,keyGenerator:req=>`conversation-sync:${req.member.id}`}),async(req,res)=>{
     z.object({}).strict().parse(req.body);fresh(req);
     const result=await syncItemConversation(db,config,req.params.id,{force:true,fetchImpl});
+    if(result.newMessages?.length) services.notifyConversationMessages(result.item,result.newMessages);
     res.json({...result,conversation:listConversation(db,config,req.params.id,req.member.id)});
   });
   app.post('/api/items/:id/messages',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`comment:${req.member.id}`}),async(req,res)=>{

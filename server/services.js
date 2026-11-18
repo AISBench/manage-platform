@@ -103,10 +103,15 @@ export function createServices(db,config,integrations={}) {
     const isCommentEvent=['issue_comment','pull_request_review','pull_request_review_comment'].includes(event);
     if(isCommentEvent&&isBotActor(commentAuthor)) return [];
     const result=new Map();
+    // Comment-like events share a message-based key with polling sync so the
+    // same GitHub comment cannot be delivered twice through both paths.
+    const remoteKey=event==='issue_comment'&&payload.comment?.id?`comment:${payload.comment.id}`
+      :event==='pull_request_review'&&payload.review?.id?`review:${payload.review.id}`
+        :event==='pull_request_review_comment'&&payload.comment?.id?`review_comment:${payload.comment.id}`:null;
     const put=(member,type,reason,detail={},rank=1)=>{
       if(!member||member.status==='disabled'||String(member.github_user_id)===String(actorId)) return;
       const current=result.get(member.id);
-      if(!current||rank>current.rank) result.set(member.id,{member,type,reason,detail,rank});
+      if(!current||rank>current.rank) result.set(member.id,{member,type,reason,detail,rank,key:remoteKey?`msg:${item.id}:${remoteKey}:${member.id}`:null});
     };
     const mentions=(body,rank=5)=>{
       for(const login of mentionLogins(body)) {
@@ -164,6 +169,42 @@ export function createServices(db,config,integrations={}) {
       }
     }
     return [...result.values()];
+  }
+  // Polling fallback: when the repository has no signed webhook, conversation
+  // sync still discovers new comments. Only messages inserted after the first
+  // sync are queued, so opening an old item never floods history.
+  function conversationNotifications(item,messages) {
+    if(!getSetting(db,'rules').enabled) return;
+    const watchers=watcherMembers(item);
+    for(const message of messages) {
+      const author={login:message.authorLogin||'',id:message.authorGithubId};
+      if(isBotActor(author)) continue;
+      const actorId=identityId(message.authorGithubId);
+      const actor=message.authorLogin?`@${message.authorLogin}`:'GitHub 用户';
+      const baseKey=`msg:${item.id}:${message.remoteKey||`message:${message.id}`}`;
+      const byMember=new Map();
+      const put=(member,type,reason,rank)=>{
+        if(!member||member.status==='disabled'||(actorId&&String(member.github_user_id)===String(actorId))) return;
+        const current=byMember.get(member.id);
+        if(!current||rank>current.rank) byMember.set(member.id,{member,type,reason,rank});
+      };
+      const kind=message.kind==='review'?'review':message.kind==='review_comment'?'review_comment':'comment';
+      const body=message.body||'';
+      const location=message.path?`${message.path}${Number.isInteger(message.line)?`:${message.line}`:''}`:'';
+      let reason;
+      if(kind==='review') reason=`${actor} 提交了评审${message.state?`（${REVIEW_STATES[message.state]||message.state}）`:''}${body?`：${excerpt(body)}`:''}`;
+      else if(kind==='review_comment') reason=`${actor} 在 ${location?`${location} `:''}评论：${excerpt(body)||'（无正文）'}`;
+      else reason=`${actor} 评论：${excerpt(body)||'（无正文）'}`;
+      for(const member of watchers.values()) put(member,kind,reason,2);
+      for(const mention of db.prepare('SELECT member_id AS memberId FROM item_message_mentions WHERE message_id=?').all(message.id)) {
+        put(memberById(mention.memberId),'mention',`${actor} 在评论中 @你：${excerpt(body)||'（无正文）'}`,5);
+      }
+      if(message.inReplyTo) {
+        const parent=db.prepare('SELECT author_member_id FROM item_messages WHERE github_comment_id=?').get(`review_comment:${message.inReplyTo}`);
+        put(parent?.author_member_id&&memberById(parent.author_member_id),'reply',`${actor} 回复了你的评论${location?`（${location}）`:''}：${excerpt(body)||'（无正文）'}`,4);
+      }
+      for(const notice of byMember.values()) enqueue(item,notice.member,{type:notice.type,reason:notice.reason,key:`${baseKey}:${notice.member.id}`,detail:{url:message.url||item.url}});
+    }
   }
   function outgoingMessage(claimed) {
     if(claimed.length===1) {
@@ -351,7 +392,7 @@ export function createServices(db,config,integrations={}) {
       db.prepare('INSERT INTO webhook_deliveries VALUES (?,?)').run(delivery,nowISO());
       if(item&&getSetting(db,'rules').enabled) {
         for(const notice of eventNotifications(item,payload,event,previousCI)) {
-          enqueue(item,notice.member,{type:notice.type,reason:notice.reason,key:`evt:${config.repo}:${delivery}:${notice.member.id}`,detail:notice.detail});
+          enqueue(item,notice.member,{type:notice.type,reason:notice.reason,key:notice.key||`evt:${config.repo}:${delivery}:${notice.member.id}`,detail:notice.detail});
         }
       }
       db.exec('COMMIT');
@@ -376,7 +417,9 @@ export function createServices(db,config,integrations={}) {
     })().finally(()=>{webhookPromise=null;});
     return webhookPromise;
   }
-  async function syncConversations(options={}) {return syncConversationBatch(db,config,{...options,fetchImpl:options.fetchImpl || integrations.fetchImpl || fetch});}
+  async function syncConversations(options={}) {
+    return syncConversationBatch(db,config,{...options,fetchImpl:options.fetchImpl || integrations.fetchImpl || fetch,onNewMessages:options.onNewMessages || conversationNotifications});
+  }
   async function drain() {await Promise.allSettled([syncPromise,reminderPromise,webhookPromise,publicPortal.drain()].filter(Boolean));}
-  return {sync,runReminders,onWebhook,acceptWebhook,processWebhooks,queueAssignment,syncConversations,publicPortal,drain};
+  return {sync,runReminders,onWebhook,acceptWebhook,processWebhooks,queueAssignment,syncConversations,notifyConversationMessages:conversationNotifications,publicPortal,drain};
 }
