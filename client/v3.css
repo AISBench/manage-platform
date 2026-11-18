@@ -195,7 +195,7 @@
 .message-body{margin-top:7px;font-size:11px;line-height:1.85;color:#5f7280;overflow-wrap:anywhere}
 .message-body .item-body{margin:0;padding:0;background:none;border:0;max-height:none;font-size:11px;color:#5f7280;line-height:1.85}
 .message-body.is-collapsed{max-height:210px;overflow:hidden;mask-image:linear-gradient(#000 72%,transparent)}
-.message-expand{font-size:9px;margin-top:3px}
+.message-expand{flex:none;font-size:9px;margin-left:2px}
 .message-card.is-compact{padding:3px 0;border-bottom:1px solid #f2f5f6}
 .message-compact{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;padding:5px 4px;cursor:pointer;text-align:left;color:#7b8d99;border-radius:5px}
 .message-compact:hover{background:#f7fafb}
