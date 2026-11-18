@@ -51,24 +51,62 @@ function ReviewCode({ message, itemUrl }) {
   </div>;
 }
 
-function GitHubMessageCard({ message, itemUrl }) {
-  return <article className="gh-comment" data-message-id={message.id}>
+function GitHubMessageCard({ message, itemUrl, isReply }) {
+  return <article className={`gh-comment ${isReply ? 'is-reply' : ''}`} data-message-id={message.id}>
     <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
     <div className="gh-comment-main">
       <div className="gh-comment-head">
         <strong>{message.author.name || message.author.login}</strong>
         <span>@{message.author.login}</span>
+        {isReply && <Badge tone="neutral">回复</Badge>}
         {message.source === 'platform' && <Badge tone={message.deliveryStatus === 'demo' ? 'neutral' : 'teal'}>{message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台'}</Badge>}
         {message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}
-        {message.kind === 'review_comment' && <Badge tone="purple">{message.threadResolved ? '已解决的检视意见' : '行内评论'}</Badge>}
+        {!isReply && message.kind === 'review_comment' && <Badge tone="purple">{message.threadResolved ? '已解决的检视意见' : '行内评论'}</Badge>}
         {message.remoteDeleted && <Badge tone="red">已删除</Badge>}
         <time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>
         {message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}
       </div>
-      {message.kind === 'review_comment' && <div className="gh-comment-context"><ReviewCode message={message} itemUrl={itemUrl} /></div>}
+      {!isReply && message.kind === 'review_comment' && <div className="gh-comment-context"><ReviewCode message={message} itemUrl={itemUrl} /></div>}
       {message.body && <div className="gh-comment-body"><Markdown text={message.body} /></div>}
     </div>
   </article>;
+}
+
+// GitHub keeps review comments in threads: replies always render under the
+// comment they answer instead of mixing into the flat timeline.
+function buildGitHubThreads(messages) {
+  const commentById = new Map();
+  for (const message of messages) if (message.kind === 'review_comment' && message.reviewCommentId) commentById.set(message.reviewCommentId, message);
+  const threadKey = message => {
+    if (message.threadId) return `thread:${message.threadId}`;
+    let current = message;
+    const seen = new Set();
+    while (current?.inReplyToId) {
+      const parent = commentById.get(current.inReplyToId);
+      if (!parent || seen.has(parent.id)) break;
+      seen.add(parent.id);
+      current = parent;
+    }
+    return `comment:${current.id}`;
+  };
+  const items = [];
+  const groups = new Map();
+  for (const message of messages) {
+    if (message.kind !== 'review_comment') { items.push({ type: 'single', message }); continue; }
+    const key = threadKey(message);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(message);
+  }
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt));
+    items.push({ type: 'thread', root: group[0], replies: group.slice(1) });
+  }
+  items.sort((a, b) => {
+    const left = a.type === 'single' ? a.message : a.root;
+    const right = b.type === 'single' ? b.message : b.root;
+    return left.createdAt === right.createdAt ? left.id.localeCompare(right.id) : left.createdAt.localeCompare(right.createdAt);
+  });
+  return items;
 }
 
 function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying, canWrite, onResolve, resolving }) {
@@ -136,6 +174,7 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   const orderedMessages = view === 'github'
     ? [...visibleMessages].sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt))
     : visibleMessages;
+  const githubThreads = view === 'github' ? buildGitHubThreads(orderedMessages) : [];
   const canWrite = session.demo || user.githubWriteReady;
   const open = data?.item?.state === 'open';
   const participants = data?.item ? [data.item.author, ...(data.item.assignees || []), ...(data.item.reviewers || [])].filter(Boolean) : [];
@@ -226,9 +265,14 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     {error ? <ErrorBox error={error} retry={() => reload({ refresh: true })} /> : loading && !data ? <Spinner label="正在读取对话…" /> : <>
       {unread > 0 && <div className="unread-banner">有 {unread} 条未读消息{data.unread.mentions ? `，其中 ${data.unread.mentions} 条 @你` : ''}</div>}
       {view === 'github' && moreButton}
-      <div className={`message-list ${view === 'github' ? 'is-github' : ''}`}>{orderedMessages.length ? orderedMessages.map(message => view === 'github'
-        ? <GitHubMessageCard key={message.id} message={message} itemUrl={data?.item?.url} />
-        : <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
+      <div className={`message-list ${view === 'github' ? 'is-github' : ''}`}>{orderedMessages.length ? (view === 'github'
+        ? githubThreads.map(item => item.type === 'thread'
+          ? <div className="gh-thread" key={item.root.id}>
+            <GitHubMessageCard message={item.root} itemUrl={data?.item?.url} />
+            {item.replies.map(reply => <GitHubMessageCard key={reply.id} message={reply} itemUrl={data?.item?.url} isReply />)}
+          </div>
+          : <GitHubMessageCard key={item.message.id} message={item.message} itemUrl={data?.item?.url} />)
+        : orderedMessages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />)) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
       {view === 'timeline' && moreButton}
     </>}
   </section>;

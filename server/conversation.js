@@ -431,6 +431,8 @@ function messageView(db, row, memberId) {
     path: row.path, line: row.line, startLine: row.start_line ?? null, side: row.side || null,
     diffHunk: row.diff_hunk || null,
     reviewCommentId: typeof row.github_comment_id === 'string' && row.github_comment_id.startsWith('review_comment:') ? row.github_comment_id.slice('review_comment:'.length) : null,
+    inReplyToId: row.in_reply_to_id || null,
+    threadId: row.thread_id || null,
     state: row.state,
     threadResolved: !!row.thread_resolved,
     canResolve: row.kind === 'review_comment' && !!row.thread_id && !row.thread_resolved,

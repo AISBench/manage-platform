@@ -106,19 +106,28 @@ test('unresolved review threads resolve on GitHub as the member', async t => {
         mutation = payload;
         return json({ data: { resolveReviewThread: { thread: { id: payload.variables.threadId, isResolved: true } } } });
       }
-      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'PRT_302', isResolved: false, comments: { nodes: [{ databaseId: 77 }] } }] } } } } });
+      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'PRT_302', isResolved: false, comments: { nodes: [{ databaseId: 77 }, { databaseId: 78 }] } }] } } } } });
     }
     if (target.includes('/issues/302/comments') || target.includes('/issues/302/timeline') || target.includes('/pulls/302/reviews')) return json([]);
-    if (target.includes('/pulls/302/comments')) return json([{ id: 77, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' }]);
+    if (target.includes('/pulls/302/comments')) return json([
+      { id: 77, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' },
+      { id: 78, body: 'answered', user: { id: 999, login: 'alice' }, created_at: '2026-01-01T00:30:00Z', updated_at: '2026-01-01T00:30:00Z', in_reply_to_id: 77, path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' },
+    ]);
     if (target.includes('/pulls/302')) return json({ number: 302, state: 'open', head: { sha } });
     if (target.includes('/check-runs')) return json({ check_runs: [] });
     if (target.includes('/statuses')) return json([]);
     return json([]);
   };
   await syncItemConversation(db, config(), 'github:302', { force: true, fetchImpl });
-  const comment = listConversation(db, config(), 'github:302', member.id).messages.find(message => message.kind === 'review_comment');
+  const synced = listConversation(db, config(), 'github:302', member.id).messages;
+  const comment = synced.find(message => message.reviewCommentId === '77');
+  const reply = synced.find(message => message.reviewCommentId === '78');
   assert.equal(comment.canResolve, true, 'unresolved threads expose the resolve action');
   assert.equal(comment.threadResolved, false);
+  assert.equal(comment.inReplyToId, null);
+  assert.equal(comment.threadId, 'PRT_302', 'the GraphQL thread id is exposed for grouping');
+  assert.equal(reply.inReplyToId, '77', 'replies keep the parent comment id');
+  assert.equal(reply.threadId, 'PRT_302');
 
   await assert.rejects(
     () => resolveItemReviewThread(db, config(), { member, itemId: 'github:302', messageId: comment.id, fetchImpl }),
@@ -131,6 +140,7 @@ test('unresolved review threads resolve on GitHub as the member', async t => {
   assert.equal(mutation.variables.threadId, 'PRT_302');
   assert.match(mutation.query, /resolveReviewThread/);
   assert.equal(db.prepare('SELECT thread_resolved FROM item_messages WHERE id=?').get(comment.id).thread_resolved, 1);
+  assert.equal(db.prepare('SELECT thread_resolved FROM item_messages WHERE id=?').get(reply.id).thread_resolved, 1, 'every cached comment of the thread is marked resolved');
   const resolved = listConversation(db, config(), 'github:302', member.id).messages.find(message => message.id === comment.id);
   assert.equal(resolved.threadResolved, true);
   assert.equal(resolved.canResolve, false);
@@ -143,7 +153,7 @@ test('unresolved review threads resolve on GitHub as the member', async t => {
   assert.equal(again.alreadyResolved, true, 'resolving twice is idempotent');
 
   db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_login,body,thread_id,created_at,updated_at,synced_at)
-    VALUES ('message-302-b','github:302','github','review_comment','review_comment:78','bob','other nit','PRT_303','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`).run();
+    VALUES ('message-302-b','github:302','github','review_comment','review_comment:88','bob','other nit','PRT_303','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`).run();
   await assert.rejects(
     () => resolveItemReviewThread(db, config(), {
       member, itemId: 'github:302', messageId: 'message-302-b',
