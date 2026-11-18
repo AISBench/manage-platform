@@ -231,6 +231,9 @@
 .gh-thread .gh-comment-head{background:transparent;border-bottom:0;padding:0 0 6px}
 .gh-thread .gh-comment.is-reply{position:relative;padding-left:46px}
 .gh-thread .gh-comment.is-reply::before{content:'';position:absolute;left:24px;top:0;bottom:0;width:2px;background:#eef2f4}
+.gh-thread .gh-comment-context{padding:6px 0 0}
+.gh-thread .gh-comment-body{padding:6px 0 0}
+.gh-thread .gh-comment-actions{padding:2px 0 0}
 .gh-comment-main{flex:1;min-width:0;border:1px solid #dfe6ea;border-radius:6px;background:#fff;overflow:hidden}
 .gh-comment-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 10px;background:#f6f8fa;border-bottom:1px solid #e6ebee;font-size:9px;color:#7b8d99}
 .gh-comment-head strong{font-size:10px;color:#334b5a}
@@ -239,6 +242,7 @@
 .gh-comment-context .review-code{margin-top:0}
 .gh-comment-body{padding:9px 12px;font-size:11px;line-height:1.8;color:#5f7280;overflow-wrap:anywhere}
 .gh-comment-body .item-body{margin:0;padding:0;background:none;border:0;max-height:none;font-size:11px;color:#5f7280;line-height:1.8}
+.gh-comment-actions{display:flex;justify-content:flex-end;padding:0 12px 10px}
 .conversation-more{display:flex;margin:0 auto 18px}
 .row-unread{font-size:8px;background:#eef7f4;color:#409a83;border-radius:3px;padding:1px 5px;white-space:nowrap}
 .row-unread.mention{background:#fff4dd;color:#b88a32}

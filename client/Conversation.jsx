@@ -51,7 +51,7 @@ function ReviewCode({ message, itemUrl }) {
   </div>;
 }
 
-function GitHubMessageCard({ message, itemUrl, isReply }) {
+function GitHubMessageCard({ message, itemUrl, isReply, canWrite, onResolve, resolving }) {
   return <article className={`gh-comment ${isReply ? 'is-reply' : ''}`} data-message-id={message.id}>
     <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
     <div className="gh-comment-main">
@@ -68,6 +68,7 @@ function GitHubMessageCard({ message, itemUrl, isReply }) {
       </div>
       {!isReply && message.kind === 'review_comment' && <div className="gh-comment-context"><ReviewCode message={message} itemUrl={itemUrl} /></div>}
       {message.body && <div className="gh-comment-body"><Markdown text={message.body} /></div>}
+      {!isReply && message.canResolve && canWrite && <div className="gh-comment-actions"><button type="button" className="text-button" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button></div>}
     </div>
   </article>;
 }
@@ -268,10 +269,10 @@ export default function Conversation({ itemId, data, user, session, notify, relo
       <div className={`message-list ${view === 'github' ? 'is-github' : ''}`}>{orderedMessages.length ? (view === 'github'
         ? githubThreads.map(item => item.type === 'thread'
           ? <div className="gh-thread" key={item.root.id}>
-            <GitHubMessageCard message={item.root} itemUrl={data?.item?.url} />
+            <GitHubMessageCard message={item.root} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.root.id} />
             {item.replies.map(reply => <GitHubMessageCard key={reply.id} message={reply} itemUrl={data?.item?.url} isReply />)}
           </div>
-          : <GitHubMessageCard key={item.message.id} message={item.message} itemUrl={data?.item?.url} />)
+          : <GitHubMessageCard key={item.message.id} message={item.message} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.message.id} />)
         : orderedMessages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />)) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
       {view === 'timeline' && moreButton}
     </>}
