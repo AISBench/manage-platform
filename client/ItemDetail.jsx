@@ -108,11 +108,11 @@ export default function ItemDetail({ itemId, user, session, notify, onBack }) {
     <div className="detail-tabs" role="tablist">{TABS.map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}{key === 'ci' && sideEvents.ci.length ? ` ${sideEvents.ci.length}` : ''}{key === 'operations' && sideEvents.operation.length ? ` ${sideEvents.operation.length}` : ''}</button>)}</div>
     <div className="item-detail-layout">
       <div className={`item-detail-main ${tab === 'conversation' ? 'is-active' : ''}`}><ItemDescription item={item} /><Conversation itemId={itemId} data={data} user={user} session={session} notify={notify} reload={load} loading={loading} error={error} older={older} onLoadOlder={loadOlder} /></div>
-      <aside className="item-detail-side">
+      <aside className="item-detail-side"><div className="side-inner">
+        <div className={tab === 'info' ? 'side-active' : ''}><InfoColumn item={item} user={user} notify={notify} onSaved={() => load({ refresh: false })} /></div>
         <div className={tab === 'ci' ? 'side-active' : ''}><CIColumn events={sideEvents.ci} itemId={itemId} user={user} session={session} notify={notify} onChanged={() => load({ refresh: false })} onCiTriggered={trackCi} /></div>
         <div className={tab === 'operations' ? 'side-active' : ''}><OperationsColumn events={sideEvents.operation} /></div>
-        <div className={tab === 'info' ? 'side-active' : ''}><InfoColumn item={item} user={user} notify={notify} onSaved={() => load({ refresh: false })} /></div>
-      </aside>
+      </div></aside>
     </div>
   </div>;
 }

@@ -212,6 +212,18 @@ export function openDatabase(filename) {
           verified_at TEXT);`);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(8, new Date().toISOString());
       }
+      if (!applied.has(9)) {
+        // GitHub only exposes review-thread resolution through GraphQL; keep the
+        // flag on the comment so resolved threads can collapse in the UI.
+        addColumn(db, 'item_messages', 'thread_resolved', 'INTEGER NOT NULL DEFAULT 0');
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(9, new Date().toISOString());
+      }
+      if (!applied.has(10)) {
+        // Resolving a conversation needs the GraphQL review-thread node id,
+        // which REST never returns; the sync stores it next to the comment.
+        addColumn(db, 'item_messages', 'thread_id', 'TEXT');
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(10, new Date().toISOString());
+      }
       if (!applied.has(11)) {
         // Per-member delivery mode: realtime or a scheduled digest. Event type
         // and detail keep Feishu messages precise without re-parsing subjects.

@@ -72,6 +72,11 @@
 .detail-sync-error.auth-notice.is-error{border-color:#f3d3d3;background:#fff6f6;color:#b35656}
 .detail-tabs{display:none}
 .item-detail-layout{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:22px;margin-top:22px;align-items:start}
+.item-detail-side{align-self:stretch;min-width:0}
+.side-inner{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow-y:auto;padding-right:4px}
+.side-inner::-webkit-scrollbar{width:6px}
+.side-inner::-webkit-scrollbar-thumb{background:#dbe4e9;border-radius:3px}
+.operation-more{margin:8px 18px 12px;font-size:10px}
 .detail-card{background:#fff;border:1px solid #e6ecef;border-radius:9px;box-shadow:0 1px 3px #20394a05;margin-bottom:18px;overflow:hidden}
 .detail-card-title{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:15px 18px;border-bottom:1px solid #eef2f4}
 .detail-card-title h3{display:flex;align-items:center;gap:7px;font-size:12px;color:#5d7280;font-weight:600}
@@ -150,6 +155,14 @@
 .conversation-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid #eef2f4}
 .conversation-head h2{display:flex;align-items:center;gap:7px;font-size:13px;color:#4f6573;font-weight:600}
 .conversation-head p{font-size:9px;color:#a1afb9;margin-top:5px}
+.conversation-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 20px;border-bottom:1px solid #eef2f4;background:#fbfcfd}
+.seg-control{display:inline-flex;border:1px solid #dbe4e9;border-radius:6px;overflow:hidden;background:#fff}
+.seg-control button{border:0;background:transparent;padding:4px 10px;font-size:10px;color:#7b8d99;cursor:pointer}
+.seg-control button+button{border-left:1px solid #e6ecef}
+.seg-control button.active{background:#eef4f7;color:#33505f;font-weight:600}
+.author-filter{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#96a5af}
+.author-filter select{font-size:10px;padding:3px 6px;border:1px solid #dbe4e9;border-radius:5px;background:#fff;color:#5b7280;max-width:160px}
+.conversation-count{font-size:9px;color:#a9b5be;margin-left:auto}
 .composer{padding:14px 20px;border-bottom:1px solid #eef2f4;background:#fbfcfd}
 .composer textarea{width:100%;border:1px solid #e2e9ec;border-radius:7px;padding:10px 12px;font-size:11px;line-height:1.8;color:#5c707d;resize:vertical;background:#fff}
 .composer textarea:focus{outline:none;border-color:#89bfb2;box-shadow:0 0 0 3px #0d94880a}
@@ -193,7 +206,16 @@
 .message-body{margin-top:7px;font-size:11px;line-height:1.85;color:#5f7280;overflow-wrap:anywhere}
 .message-body .item-body{margin:0;padding:0;background:none;border:0;max-height:none;font-size:11px;color:#5f7280;line-height:1.85}
 .message-body.is-collapsed{max-height:210px;overflow:hidden;mask-image:linear-gradient(#000 72%,transparent)}
-.message-expand{font-size:9px;margin-top:3px}
+.message-expand{flex:none;font-size:9px;margin-left:2px}
+.message-card.is-compact{display:flex;align-items:center;gap:4px;padding:3px 0;border-bottom:1px solid #f2f5f6}
+.message-compact{display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;background:transparent;padding:5px 4px;cursor:pointer;text-align:left;color:#7b8d99;border-radius:5px}
+.message-compact:hover{background:#f7fafb}
+.compact-resolve{flex:none;font-size:9px;white-space:nowrap}
+.message-resolve{margin-right:auto}
+.compact-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.compact-meta{display:flex;align-items:center;gap:6px;font-size:9px;color:#9aa7b0;flex-wrap:wrap}
+.compact-meta strong{color:#5f7480;font-size:10px}
+.compact-snippet{font-size:10px;color:#8b9ba6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .message-failed{display:flex;align-items:center;gap:6px;margin-top:8px;padding:7px 9px;background:#fff8f6;border:1px solid #f2ded9;border-radius:5px;color:#bd8578;font-size:9px}
 .message-failed .text-button{font-size:9px;margin-left:auto}
 .message-footer{display:flex;align-items:center;justify-content:flex-end;margin-top:6px}
@@ -203,6 +225,27 @@
 .read-member{display:inline-flex;align-items:center;gap:4px}
 .read-member .avatar{width:18px;height:18px;font-size:7px;border-width:1px}
 .conversation-empty{text-align:center;padding:40px 20px;color:#a9b5be;font-size:11px}
+.message-list.is-github{display:flex;flex-direction:column;gap:12px;padding-top:14px}
+.gh-comment{display:flex;gap:8px;align-items:flex-start}
+.gh-thread{display:flex;flex-direction:column;border:1px solid #dfe6ea;border-radius:6px;background:#fff;overflow:hidden}
+.gh-thread .gh-comment{padding:10px 12px}
+.gh-thread>.gh-comment+.gh-comment{border-top:1px solid #eef2f4}
+.gh-thread .gh-comment-main{border:0;border-radius:0;background:transparent;overflow:visible}
+.gh-thread .gh-comment-head{background:transparent;border-bottom:0;padding:0 0 6px}
+.gh-thread .gh-comment.is-reply{position:relative;padding-left:46px}
+.gh-thread .gh-comment.is-reply::before{content:'';position:absolute;left:24px;top:0;bottom:0;width:2px;background:#eef2f4}
+.gh-thread .gh-comment-context{padding:6px 0 0}
+.gh-thread .gh-comment-body{padding:6px 0 0}
+.gh-thread .gh-comment-actions{padding:2px 0 0}
+.gh-comment-main{flex:1;min-width:0;border:1px solid #dfe6ea;border-radius:6px;background:#fff;overflow:hidden}
+.gh-comment-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 10px;background:#f6f8fa;border-bottom:1px solid #e6ebee;font-size:9px;color:#7b8d99}
+.gh-comment-head strong{font-size:10px;color:#334b5a}
+.gh-comment-head time{margin-left:auto;font-size:8px;color:#a9b6bf}
+.gh-comment-context{padding:9px 10px 0}
+.gh-comment-context .review-code{margin-top:0}
+.gh-comment-body{padding:9px 12px;font-size:11px;line-height:1.8;color:#5f7280;overflow-wrap:anywhere}
+.gh-comment-body .item-body{margin:0;padding:0;background:none;border:0;max-height:none;font-size:11px;color:#5f7280;line-height:1.8}
+.gh-comment-actions{display:flex;justify-content:flex-end;padding:0 12px 10px}
 .conversation-more{display:flex;margin:0 auto 18px}
 .row-unread{font-size:8px;background:#eef7f4;color:#409a83;border-radius:3px;padding:1px 5px;white-space:nowrap}
 .row-unread.mention{background:#fff4dd;color:#b88a32}

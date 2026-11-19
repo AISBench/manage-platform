@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, CircleAlert, ExternalLink, Eye, LoaderCircle, MessageCircle, RefreshCw, Send } from 'lucide-react';
+import { CheckCheck, ChevronDown, ChevronUp, CircleAlert, ExternalLink, Eye, LoaderCircle, MessageCircle, RefreshCw, Send } from 'lucide-react';
 import { api } from './api.js';
 import { Avatar, Badge, ErrorBox, Spinner, date } from './ui.jsx';
 import Markdown from './Markdown.jsx';
@@ -51,21 +51,96 @@ function ReviewCode({ message, itemUrl }) {
   </div>;
 }
 
-function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying }) {
+function GitHubMessageCard({ message, itemUrl, isReply, canWrite, onResolve, resolving }) {
+  return <article className={`gh-comment ${isReply ? 'is-reply' : ''}`} data-message-id={message.id}>
+    <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
+    <div className="gh-comment-main">
+      <div className="gh-comment-head">
+        <strong>{message.author.name || message.author.login}</strong>
+        <span>@{message.author.login}</span>
+        {isReply && <Badge tone="neutral">回复</Badge>}
+        {message.source === 'platform' && <Badge tone={message.deliveryStatus === 'demo' ? 'neutral' : 'teal'}>{message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台'}</Badge>}
+        {message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}
+        {!isReply && message.kind === 'review_comment' && <Badge tone="purple">{message.threadResolved ? '已解决的检视意见' : '行内评论'}</Badge>}
+        {message.remoteDeleted && <Badge tone="red">已删除</Badge>}
+        <time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>
+        {message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}
+      </div>
+      {!isReply && message.kind === 'review_comment' && <div className="gh-comment-context"><ReviewCode message={message} itemUrl={itemUrl} /></div>}
+      {message.body && <div className="gh-comment-body"><Markdown text={message.body} /></div>}
+      {!isReply && message.canResolve && canWrite && <div className="gh-comment-actions"><button type="button" className="text-button" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button></div>}
+    </div>
+  </article>;
+}
+
+// GitHub keeps review comments in threads: replies always render under the
+// comment they answer instead of mixing into the flat timeline.
+function buildGitHubThreads(messages) {
+  const commentById = new Map();
+  for (const message of messages) if (message.kind === 'review_comment' && message.reviewCommentId) commentById.set(message.reviewCommentId, message);
+  const threadKey = message => {
+    if (message.threadId) return `thread:${message.threadId}`;
+    let current = message;
+    const seen = new Set();
+    while (current?.inReplyToId) {
+      const parent = commentById.get(current.inReplyToId);
+      if (!parent || seen.has(parent.id)) break;
+      seen.add(parent.id);
+      current = parent;
+    }
+    return `comment:${current.id}`;
+  };
+  const items = [];
+  const groups = new Map();
+  for (const message of messages) {
+    if (message.kind !== 'review_comment') { items.push({ type: 'single', message }); continue; }
+    const key = threadKey(message);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(message);
+  }
+  for (const group of groups.values()) {
+    group.sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt));
+    items.push({ type: 'thread', root: group[0], replies: group.slice(1) });
+  }
+  items.sort((a, b) => {
+    const left = a.type === 'single' ? a.message : a.root;
+    const right = b.type === 'single' ? b.message : b.root;
+    return left.createdAt === right.createdAt ? left.id.localeCompare(right.id) : left.createdAt.localeCompare(right.createdAt);
+  });
+  return items;
+}
+
+function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying, canWrite, onResolve, resolving }) {
   const elementRef = useRef(null);
   const own = message.author.memberId && message.author.memberId === user.memberId;
   const mentionSelf = (message.mentions || []).some(mention => mention.isSelf);
   const long = message.body.length > LONG_CHARS || message.body.split('\n').length > LONG_LINES;
+  const resolvedThread = message.kind === 'review_comment' && message.threadResolved === true;
+  // Read messages and resolved review threads collapse to one scan-friendly line.
+  const foldable = resolvedThread || (message.readByMe && !mentionSelf);
+  if (foldable && !expanded) {
+    const snippet = String(message.body || '').replace(/\s+/g, ' ').trim().slice(0, 90);
+    return <article ref={elementRef} data-message-id={message.id} className={`message-card is-compact ${own ? 'is-own' : ''}`}>
+      <button type="button" className="message-compact" aria-expanded={false} onClick={() => onToggle(message.id)}>
+        <Avatar login={message.author.login} src={message.author.avatarUrl} size="tiny" />
+        <span className="compact-main">
+          <span className="compact-meta"><strong>{message.author.name || message.author.login}</strong>{resolvedThread && <Badge tone="purple">已解决的检视意见</Badge>}{message.readByMe && <Badge tone="neutral">已读</Badge>}{message.kind === 'review_comment' && !resolvedThread && <Badge tone="purple">行内评论</Badge>}<time dateTime={message.createdAt}>{date(message.createdAt, true)}</time></span>
+          <span className="compact-snippet">{snippet || '（无正文）'}</span>
+        </span>
+        <ChevronDown size={14} />
+      </button>
+      {message.canResolve && canWrite && <button type="button" className="text-button compact-resolve" disabled={resolving} title="在 GitHub 中将该检视线程标记为已解决" onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}解决</button>}
+    </article>;
+  }
   return <article ref={elementRef} data-message-id={message.id} className={`message-card ${own ? 'is-own' : ''} ${mentionSelf ? 'is-mention' : ''} ${message.deliveryStatus === 'failed' ? 'is-failed' : ''}`}>
     <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
     <div className="message-main">
-      <div className="message-meta"><strong>{message.author.name || message.author.login}</strong><span>@{message.author.login}</span><Badge tone={message.source === 'platform' ? 'teal' : 'neutral'}>{message.source === 'platform' ? (message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台') : 'GitHub'}</Badge>{message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}{message.kind === 'review_comment' && <Badge tone="purple">行内评论</Badge>}{mentionSelf && <Badge tone="amber">@你</Badge>}{message.remoteDeleted && <Badge tone="red">已删除</Badge>}<time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>{message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}</div>
+      <div className="message-meta"><strong>{message.author.name || message.author.login}</strong><span>@{message.author.login}</span><Badge tone={message.source === 'platform' ? 'teal' : 'neutral'}>{message.source === 'platform' ? (message.deliveryStatus === 'demo' ? '平台 · 演示' : '平台') : 'GitHub'}</Badge>{message.kind === 'review' && <Badge tone="purple">Review {message.state || ''}</Badge>}{message.kind === 'review_comment' && <Badge tone="purple">行内评论</Badge>}{resolvedThread && <Badge tone="purple">已解决</Badge>}{mentionSelf && <Badge tone="amber">@你</Badge>}{message.remoteDeleted && <Badge tone="red">已删除</Badge>}<time dateTime={message.createdAt}>{date(message.createdAt, true)}</time>{message.url && <a className="external-text-link" href={message.url} target="_blank" rel="noreferrer">GitHub</a>}{(long || foldable) && <button type="button" className="text-button message-expand" aria-expanded={expanded} onClick={() => onToggle(message.id)}>{expanded ? <><ChevronUp size={13} />收起</> : <><ChevronDown size={13} />{long ? '展开全文' : '展开'}</>}</button>}</div>
       {mentionSelf && <div className="message-mention-banner">有人在这条消息中提到了你</div>}
       {message.kind === 'review_comment' && <ReviewCode message={message} itemUrl={itemUrl} />}
       <div className={`message-body ${long && !expanded ? 'is-collapsed' : ''}`}><Markdown text={message.body || '（无正文）'} /></div>
-      {long && <button className="text-button message-expand" onClick={() => onToggle(message.id)}>{expanded ? <><ChevronUp size={13} />收起</> : <><ChevronDown size={13} />展开全文</>}</button>}
       {message.deliveryStatus === 'failed' && <div className="message-failed"><CircleAlert size={14} /><span>{message.deliveryError === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权失效，请重新授权' : message.deliveryError === 'GITHUB_FORBIDDEN' ? '没有评论权限' : '同步到 GitHub 失败'}</span><button className="text-button" disabled={retrying} onClick={() => onRetry(message.id)}>{retrying ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}重试</button></div>}
-      <div className="message-footer"><button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
+      <div className="message-footer">{message.canResolve && canWrite && <button type="button" className="text-button message-resolve" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button>}<button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
       {reads?.messageId === message.id && <div className="read-list">{reads.loading ? <Spinner compact label="读取已读成员…" /> : reads.members?.length ? reads.members.map(member => <span key={member.memberId} className="read-member"><Avatar login={member.login} src={member.avatarUrl} size="tiny" />{member.displayName || member.login}</span>) : <span className="muted">还没有其他平台成员读过这条消息</span>}{reads.error && <ErrorBox compact error={reads.error} />}</div>}
     </div>
   </article>;
@@ -79,16 +154,39 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   const [expanded, setExpanded] = useState(new Set());
   const [reads, setReads] = useState(null);
   const [retrying, setRetrying] = useState('');
+  const [resolving, setResolving] = useState('');
+  const viewKey = `conversation-view:${itemId}`;
+  const [view, setView] = useState(() => { try { return localStorage.getItem(viewKey) === 'timeline' ? 'timeline' : 'github'; } catch { return 'github'; } });
+  const [authorFilter, setAuthorFilter] = useState('all');
   const pendingReads = useRef(new Set());
   const observer = useRef(null);
   const flushTimer = useRef(null);
   const messages = [...(data?.messages || []), ...(older || [])];
+  const authorOptions = [];
+  const seenAuthors = new Set();
+  for (const message of messages) {
+    const key = (message.author?.login || '').toLowerCase();
+    if (!key || seenAuthors.has(key)) continue;
+    seenAuthors.add(key);
+    authorOptions.push({ login: message.author.login, name: message.author.name || message.author.login });
+  }
+  authorOptions.sort((a, b) => a.login.localeCompare(b.login));
+  const visibleMessages = authorFilter === 'all' ? messages : messages.filter(message => (message.author?.login || '').toLowerCase() === authorFilter);
+  const orderedMessages = view === 'github'
+    ? [...visibleMessages].sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt))
+    : visibleMessages;
+  const githubThreads = view === 'github' ? buildGitHubThreads(orderedMessages) : [];
   const canWrite = session.demo || user.githubWriteReady;
   const open = data?.item?.state === 'open';
   const participants = data?.item ? [data.item.author, ...(data.item.assignees || []), ...(data.item.reviewers || [])].filter(Boolean) : [];
 
   useEffect(() => { try { setDraft(localStorage.getItem(draftKey) || ''); } catch { setDraft(''); } }, [draftKey]);
   useEffect(() => { try { if (draft) localStorage.setItem(draftKey, draft); else localStorage.removeItem(draftKey); } catch { /* drafts are best-effort */ } }, [draft, draftKey]);
+  useEffect(() => {
+    try { setView(localStorage.getItem(viewKey) === 'timeline' ? 'timeline' : 'github'); } catch { setView('github'); }
+    setAuthorFilter('all');
+  }, [viewKey]);
+  useEffect(() => { try { localStorage.setItem(viewKey, view); } catch { /* view preference is best-effort */ } }, [view, viewKey]);
 
   useEffect(() => {
     observer.current = new IntersectionObserver(entries => {
@@ -105,9 +203,10 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   }, [itemId]);
 
   useEffect(() => {
-    for (const element of document.querySelectorAll('.message-card[data-message-id]')) observer.current?.observe(element);
-    return () => { for (const element of document.querySelectorAll('.message-card[data-message-id]')) observer.current?.unobserve(element); };
-  }, [messages.length]);
+    const elements = document.querySelectorAll('.conversation-panel [data-message-id]');
+    for (const element of elements) observer.current?.observe(element);
+    return () => { for (const element of elements) observer.current?.unobserve(element); };
+  }, [messages.length, view, authorFilter]);
 
   function toggle(id) { setExpanded(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
   async function showReads(messageId) {
@@ -131,9 +230,32 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     try { await api(`/api/items/${encodeURIComponent(itemId)}/messages/${encodeURIComponent(messageId)}/retry`, { method: 'POST', body: {} }); notify?.('已重新同步到 GitHub'); await reload({ refresh: true }); }
     catch (e) { setSendError(e); } finally { setRetrying(''); }
   }
+  async function resolveThread(messageId) {
+    setResolving(messageId);
+    try {
+      const result = await api(`/api/items/${encodeURIComponent(itemId)}/messages/${encodeURIComponent(messageId)}/resolve`, { method: 'POST', body: {} });
+      notify?.(result.demo ? '演示模式：已标记为已解决' : '已在 GitHub 中标记为已解决');
+      await reload({ refresh: false });
+    } catch (e) { notify?.(e.message || '标记已解决失败', 'error'); }
+    finally { setResolving(''); }
+  }
   const unread = data?.unread?.unread || 0;
+  const moreButton = messages.length >= 50 ? <button className="btn btn-secondary btn-small conversation-more" onClick={onLoadOlder}>加载更早消息</button> : null;
   return <section className="conversation-panel">
-    <div className="conversation-head"><div><h2><MessageCircle size={17} />对话</h2><p>最新消息在前 · 平台发言以你的 GitHub 身份同步</p></div><Badge tone={unread ? 'amber' : 'neutral'}>{unread ? `${unread} 条未读` : '已读'}{data?.unread?.mentions ? ` · @我 ${data.unread.mentions}` : ''}</Badge></div>
+    <div className="conversation-head"><div><h2><MessageCircle size={17} />对话</h2><p>{view === 'github' ? '与 GitHub 评论区一致（时间正序）' : '平台时间视图（最新在前）'} · 平台发言以你的 GitHub 身份同步</p></div><Badge tone={unread ? 'amber' : 'neutral'}>{unread ? `${unread} 条未读` : '已读'}{data?.unread?.mentions ? ` · @我 ${data.unread.mentions}` : ''}</Badge></div>
+    <div className="conversation-tools">
+      <div className="seg-control" role="group" aria-label="评论区视图">
+        <button type="button" className={view === 'github' ? 'active' : ''} aria-pressed={view === 'github'} onClick={() => setView('github')}>GitHub 视图</button>
+        <button type="button" className={view === 'timeline' ? 'active' : ''} aria-pressed={view === 'timeline'} onClick={() => setView('timeline')}>时间视图</button>
+      </div>
+      <label className="author-filter">用户
+        <select value={authorFilter} onChange={event => setAuthorFilter(event.target.value)}>
+          <option value="all">全部用户</option>
+          {authorOptions.map(author => <option key={author.login} value={author.login.toLowerCase()}>{author.name}</option>)}
+        </select>
+      </label>
+      <span className="conversation-count">{visibleMessages.length} 条</span>
+    </div>
     <form className="composer" onSubmit={send}>
       {!canWrite && !session.demo && <div className="composer-auth"><CircleAlert size={15} />{!session.githubWriteConfigured ? <span>服务端未配置 TOKEN_ENCRYPTION_KEY，GitHub 写权限无法保存，请联系管理员。</span> : !/(^|[\s,])(repo|public_repo)([\s,]|$)/.test(session.githubOAuthScopes || '') ? <span>当前 OAuth scope 不含仓库写权限（需要 public_repo 或 repo），请联系管理员更新 GITHUB_OAUTH_SCOPE。</span> : <><span>需要 GitHub 评论写权限后才能发言。</span><a className="btn btn-small btn-secondary" href={`/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${itemId}` })}`}>授权 GitHub</a></>}</div>}
       <MarkdownEditor value={draft} onChange={setDraft} disabled={!canWrite || !open || sending} placeholder={!open ? '已关闭的事项不能继续发言' : canWrite ? '写下你的回复… 支持 Markdown、@成员、#事务引用（Cmd/Ctrl+Enter 发送）' : '授权后即可发言'} participants={participants} maxLength={20000} onSubmit={send} />
@@ -143,8 +265,16 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     </form>
     {error ? <ErrorBox error={error} retry={() => reload({ refresh: true })} /> : loading && !data ? <Spinner label="正在读取对话…" /> : <>
       {unread > 0 && <div className="unread-banner">有 {unread} 条未读消息{data.unread.mentions ? `，其中 ${data.unread.mentions} 条 @你` : ''}</div>}
-      <div className="message-list">{messages.length ? messages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} />) : <div className="conversation-empty">还没有评论，发送第一条消息吧。</div>}</div>
-      {messages.length >= 50 && <button className="btn btn-secondary btn-small conversation-more" onClick={onLoadOlder}>加载更早消息</button>}
+      {view === 'github' && moreButton}
+      <div className={`message-list ${view === 'github' ? 'is-github' : ''}`}>{orderedMessages.length ? (view === 'github'
+        ? githubThreads.map(item => item.type === 'thread'
+          ? <div className="gh-thread" key={item.root.id}>
+            <GitHubMessageCard message={item.root} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.root.id} />
+            {item.replies.map(reply => <GitHubMessageCard key={reply.id} message={reply} itemUrl={data?.item?.url} isReply />)}
+          </div>
+          : <GitHubMessageCard key={item.message.id} message={item.message} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.message.id} />)
+        : orderedMessages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />)) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
+      {view === 'timeline' && moreButton}
     </>}
   </section>;
 }

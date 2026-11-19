@@ -4,7 +4,7 @@ import { openDatabase } from '../server/db.js';
 import { addTestMember, insertItem, testItem } from './helpers.js';
 import {
   mentionLogins, categorizeTimeline, syncItemConversation, listConversation, unreadSummary, recordReads, readsForMessage,
-  postPlatformMessage, upsertFromWebhook, dedupeStoredCI, rerunItemCI,
+  postPlatformMessage, upsertFromWebhook, dedupeStoredCI, rerunItemCI, resolveItemReviewThread,
 } from '../server/conversation.js';
 import { encryptToken, decryptToken, saveGitHubToken, getGitHubToken, deleteGitHubToken, githubTokenStatus } from '../server/github-tokens.js';
 
@@ -30,7 +30,10 @@ test('conversation sync stores comments, operation events, CI and mentions', asy
     const target = String(url);
     if (target.includes('/issues/101/comments')) return json([{ id: 1, body: 'hello @bob', user: { id: 999, login: 'alice', avatar_url: 'https://avatars.githubusercontent.com/u/999?v=4' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', html_url: 'https://github.com/x/1' }]);
     if (target.includes('/issues/101/timeline')) return json([{ id: 9, event: 'labeled', label: { name: 'bug' }, actor: { id: 999, login: 'alice' }, created_at: '2026-01-01T01:00:00Z' }]);
-    if (target.includes('/pulls/101/reviews')) return json([{ id: 3, body: 'looks good', state: 'APPROVED', user: { id: 998, login: 'bob' }, submitted_at: '2026-01-01T02:00:00Z', html_url: 'https://github.com/x/3' }]);
+    if (target.includes('/pulls/101/reviews')) return json([
+      { id: 3, body: 'looks good', state: 'APPROVED', user: { id: 998, login: 'bob' }, submitted_at: '2026-01-01T02:00:00Z', html_url: 'https://github.com/x/3' },
+      { id: 8, body: '', state: 'COMMENTED', user: { id: 998, login: 'bob' }, submitted_at: '2026-01-01T02:10:00Z', html_url: 'https://github.com/x/8' },
+    ]);
     if (target.includes('/pulls/101/comments')) return json([{ id: 4, body: 'why raise here?', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T01:30:00Z', updated_at: '2026-01-01T01:30:00Z', html_url: 'https://github.com/x/101#discussion_r4', path: 'src/tasks.py', line: 42, start_line: 41, side: 'RIGHT', diff_hunk: '@@ -39,7 +39,9 @@ def run(task):\n     result = task.execute()\n-    return result\n+    if result is None:\n+        raise ValueError("empty")\n+    return result' }]);
     if (target.includes('/pulls/101')) return json({ number: 101, head: { sha } });
     if (target.includes('/check-runs')) return json({ check_runs: [
@@ -42,11 +45,12 @@ test('conversation sync stores comments, operation events, CI and mentions', asy
   };
   const result = await syncItemConversation(db, config(), 'github:101', { force: true, fetchImpl });
   assert.equal(result.skipped, false);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_messages').get().n, 3);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_messages').get().n, 4);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_events').get().n, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM item_message_mentions').get().n, 1);
   const view = listConversation(db, config(), 'github:101', 'missing-member');
-  assert.equal(view.messages.length, 3);
+  assert.equal(view.messages.length, 3, 'empty COMMENTED reviews stay out of the conversation');
+  assert.equal(view.messages.some(message => message.kind === 'review' && !message.body.trim()), false);
   assert.equal(view.events.ci.length, 1);
   assert.equal(view.events.ci[0].detail.conclusion, 'success', 'only the latest check state for the same name is kept');
   assert.equal(view.events.ci[0].detail.runId, 7001, 'GitHub Actions checks expose the workflow run id');
@@ -60,6 +64,108 @@ test('conversation sync stores comments, operation events, CI and mentions', asy
   assert.match(inline.diffHunk, /@@ -39,7 \+39,9 @@/);
   assert.equal(inline.reviewCommentId, '4');
   assert.equal(inline.url, 'https://github.com/x/101#discussion_r4');
+});
+
+test('resolved review threads are stored and survive a failed GraphQL refresh', async t => {
+  const db = database(t);
+  const sha = 'c'.repeat(40);
+  insertItem(db, { ...testItem(), id: 'github:301', number: 301, kind: 'pr', headSha: sha });
+  let graphqlOk = true;
+  const fetchImpl = async (url, options = {}) => {
+    const target = String(url);
+    if (target.endsWith('/graphql')) {
+      assert.equal(options.method, 'POST');
+      if (!graphqlOk) return json({ errors: [{ message: 'unavailable' }] });
+      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'PRT_301', isResolved: true, comments: { nodes: [{ databaseId: 44 }] } }] } } } } });
+    }
+    if (target.includes('/issues/301/comments') || target.includes('/issues/301/timeline') || target.includes('/pulls/301/reviews')) return json([]);
+    if (target.includes('/pulls/301/comments')) return json([{ id: 44, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' }]);
+    if (target.includes('/pulls/301')) return json({ number: 301, state: 'open', head: { sha } });
+    if (target.includes('/check-runs')) return json({ check_runs: [] });
+    if (target.includes('/statuses')) return json([]);
+    return json([]);
+  };
+  await syncItemConversation(db, config(), 'github:301', { force: true, fetchImpl });
+  const resolved = listConversation(db, config(), 'github:301', 'missing-member').messages.find(message => message.kind === 'review_comment');
+  assert.equal(resolved.threadResolved, true, 'GraphQL resolution is mapped onto the inline comment');
+
+  graphqlOk = false;
+  await syncItemConversation(db, config(), 'github:301', { force: true, fetchImpl });
+  const cached = listConversation(db, config(), 'github:301', 'missing-member').messages.find(message => message.kind === 'review_comment');
+  assert.equal(cached.threadResolved, true, 'a failed refresh keeps the cached resolution flag');
+  assert.equal(cached.canResolve, false, 'resolved threads are no longer resolvable');
+});
+
+test('unresolved review threads resolve on GitHub as the member', async t => {
+  const db = database(t);
+  const member = addTestMember(db, { githubId: '999', login: 'alice', status: 'active' });
+  const sha = 'e'.repeat(40);
+  insertItem(db, { ...testItem(), id: 'github:302', number: 302, kind: 'pr', headSha: sha });
+  let mutation = null;
+  const fetchImpl = async (url, options = {}) => {
+    const target = String(url);
+    if (target.endsWith('/graphql')) {
+      const payload = JSON.parse(options.body);
+      if (/mutation/.test(payload.query)) {
+        mutation = payload;
+        return json({ data: { resolveReviewThread: { thread: { id: payload.variables.threadId, isResolved: true } } } });
+      }
+      return json({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'PRT_302', isResolved: false, comments: { nodes: [{ databaseId: 77 }, { databaseId: 78 }] } }] } } } } });
+    }
+    if (target.includes('/issues/302/comments') || target.includes('/issues/302/timeline') || target.includes('/pulls/302/reviews')) return json([]);
+    if (target.includes('/pulls/302/comments')) return json([
+      { id: 77, body: 'nit', user: { id: 998, login: 'bob' }, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' },
+      { id: 78, body: 'answered', user: { id: 999, login: 'alice' }, created_at: '2026-01-01T00:30:00Z', updated_at: '2026-01-01T00:30:00Z', in_reply_to_id: 77, path: 'a.py', line: 3, side: 'RIGHT', diff_hunk: '@@ -1 +1 @@\n-a\n+b' },
+    ]);
+    if (target.includes('/pulls/302')) return json({ number: 302, state: 'open', head: { sha } });
+    if (target.includes('/check-runs')) return json({ check_runs: [] });
+    if (target.includes('/statuses')) return json([]);
+    return json([]);
+  };
+  await syncItemConversation(db, config(), 'github:302', { force: true, fetchImpl });
+  const synced = listConversation(db, config(), 'github:302', member.id).messages;
+  const comment = synced.find(message => message.reviewCommentId === '77');
+  const reply = synced.find(message => message.reviewCommentId === '78');
+  assert.equal(comment.canResolve, true, 'unresolved threads expose the resolve action');
+  assert.equal(comment.threadResolved, false);
+  assert.equal(comment.inReplyToId, null);
+  assert.equal(comment.threadId, 'PRT_302', 'the GraphQL thread id is exposed for grouping');
+  assert.equal(reply.inReplyToId, '77', 'replies keep the parent comment id');
+  assert.equal(reply.threadId, 'PRT_302');
+
+  await assert.rejects(
+    () => resolveItemReviewThread(db, config(), { member, itemId: 'github:302', messageId: comment.id, fetchImpl }),
+    error => error.code === 'GITHUB_WRITE_AUTH_REQUIRED' && !!error.authUrl,
+  );
+
+  saveGitHubToken(db, { memberId: member.id, login: 'alice', githubUserId: '999', token: 'write-token', scopes: 'read:user public_repo' }, config());
+  const result = await resolveItemReviewThread(db, config(), { member, itemId: 'github:302', messageId: comment.id, fetchImpl });
+  assert.equal(result.ok, true);
+  assert.equal(mutation.variables.threadId, 'PRT_302');
+  assert.match(mutation.query, /resolveReviewThread/);
+  assert.equal(db.prepare('SELECT thread_resolved FROM item_messages WHERE id=?').get(comment.id).thread_resolved, 1);
+  assert.equal(db.prepare('SELECT thread_resolved FROM item_messages WHERE id=?').get(reply.id).thread_resolved, 1, 'every cached comment of the thread is marked resolved');
+  const resolved = listConversation(db, config(), 'github:302', member.id).messages.find(message => message.id === comment.id);
+  assert.equal(resolved.threadResolved, true);
+  assert.equal(resolved.canResolve, false);
+  assert.ok(db.prepare("SELECT 1 FROM audit_logs WHERE action='review.resolve'").get());
+
+  const again = await resolveItemReviewThread(db, config(), {
+    member, itemId: 'github:302', messageId: comment.id,
+    fetchImpl: async () => { throw new Error('must not call GitHub'); },
+  });
+  assert.equal(again.alreadyResolved, true, 'resolving twice is idempotent');
+
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_login,body,thread_id,created_at,updated_at,synced_at)
+    VALUES ('message-302-b','github:302','github','review_comment','review_comment:88','bob','other nit','PRT_303','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`).run();
+  await assert.rejects(
+    () => resolveItemReviewThread(db, config(), {
+      member, itemId: 'github:302', messageId: 'message-302-b',
+      fetchImpl: async () => new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403, headers: { 'Content-Type': 'application/json' } }),
+    }),
+    error => error.code === 'GITHUB_FORBIDDEN' && error.status === 403,
+  );
+  assert.equal(db.prepare("SELECT thread_resolved FROM item_messages WHERE id='message-302-b'").get().thread_resolved, 0);
 });
 
 test('conversation sync mirrors GitHub close, merge, reopen and label changes', async t => {
