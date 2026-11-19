@@ -28,7 +28,7 @@ test('local assignment generates notification by member id and transactional ver
   const f=await httpFixture(t),admin=f.client('demo-admin');bindTestMember(f.db,'demo-reviewer');setSetting(f.db,'rules',{enabled:true,staleHours:8760,reminderCooldownHours:24});
   const item=(await admin.request('/api/items')).data.items.find(i=>i.id==='github:9000');
   assert.equal((await admin.request(`/api/items/${item.id}`,'PATCH',{version:item.version,ownerMemberId:'demo-reviewer'})).status,200);
-  const notice=f.db.prepare("SELECT * FROM notifications WHERE reason='平台负责人分派 / 改派'").get();assert.equal(notice.recipient_member_id,'demo-reviewer');assert.equal(notice.status,'pending');
+  const notice=f.db.prepare("SELECT * FROM notifications WHERE event_type='assignment'").get();assert.equal(notice.recipient_member_id,'demo-reviewer');assert.equal(notice.status,'pending');assert.match(notice.reason,/在平台将任务分派给你/);
 });
 
 test('no active admin is observable rather than a fake delivered notification',async t=>{

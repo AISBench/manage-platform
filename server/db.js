@@ -30,7 +30,7 @@ export function openDatabase(filename) {
     try {
       db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 10)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 11)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -223,6 +223,16 @@ export function openDatabase(filename) {
         // which REST never returns; the sync stores it next to the comment.
         addColumn(db, 'item_messages', 'thread_id', 'TEXT');
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(10, new Date().toISOString());
+      }
+      if (!applied.has(11)) {
+        // Per-member delivery mode: realtime or a scheduled digest. Event type
+        // and detail keep Feishu messages precise without re-parsing subjects.
+        addColumn(db, 'users', 'notification_mode', "TEXT NOT NULL DEFAULT 'realtime' CHECK(notification_mode IN ('realtime','hourly','daily'))");
+        addColumn(db, 'users', 'digest_hour', 'INTEGER NOT NULL DEFAULT 9 CHECK(digest_hour BETWEEN 0 AND 23)');
+        addColumn(db, 'notifications', 'event_type', "TEXT NOT NULL DEFAULT 'legacy'");
+        addColumn(db, 'notifications', 'event_detail', "TEXT NOT NULL DEFAULT '{}'");
+        db.exec('CREATE INDEX IF NOT EXISTS notifications_due ON notifications(status,next_at)');
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(11, new Date().toISOString());
       }
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));
