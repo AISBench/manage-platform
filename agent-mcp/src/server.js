@@ -1,7 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { PlatformClient } from './client.js';
+
+const require = createRequire(import.meta.url);
+const { version } = require('../package.json');
 
 const asText = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
 
@@ -32,7 +36,7 @@ const draftShape = {
 };
 
 export function createMcpServer(client) {
-  const server = new McpServer({ name: 'aisbench-mcp', version: '0.1.0' });
+  const server = new McpServer({ name: 'aisbench-mcp', version });
 
   server.tool(
     'aisbench_task_list',

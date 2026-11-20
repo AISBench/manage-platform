@@ -1,6 +1,6 @@
 {
   "name": "aisbench-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for AISBench Triage: issue/PR context, read-only knowledge base search and agent task submission.",
   "license": "Apache-2.0",
   "keywords": [
@@ -29,7 +29,7 @@
     "smoke": "node tests/smoke.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

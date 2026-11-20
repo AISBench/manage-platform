@@ -28,7 +28,7 @@
 }
 ```
 
-需要固定版本时把 `aisbench-mcp` 换成 `aisbench-mcp@0.1.0`。
+需要固定版本时把 `aisbench-mcp` 换成 `aisbench-mcp@0.1.1`。
 
 Claude Code：
 
