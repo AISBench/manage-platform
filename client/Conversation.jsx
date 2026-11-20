@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { CheckCheck, ChevronDown, ChevronUp, CircleAlert, ExternalLink, Eye, LoaderCircle, MessageCircle, RefreshCw, Send } from 'lucide-react';
+import { CheckCheck, ChevronDown, ChevronUp, CircleAlert, ExternalLink, Eye, LoaderCircle, MessageCircle, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { api } from './api.js';
-import { Avatar, Badge, ErrorBox, Spinner, date } from './ui.jsx';
+import { Avatar, Badge, ErrorBox, Modal, Spinner, date } from './ui.jsx';
 import Markdown from './Markdown.jsx';
 import MarkdownEditor from './MarkdownEditor.jsx';
 
 const LONG_CHARS = 800;
 const LONG_LINES = 12;
+const REPLYABLE_KINDS = ['issue_comment', 'review_comment', 'platform'];
 
 function parseDiffHunk(hunk, targetLine, side) {
   const rows = [];
@@ -51,7 +52,7 @@ function ReviewCode({ message, itemUrl }) {
   </div>;
 }
 
-function GitHubMessageCard({ message, itemUrl, isReply, canWrite, onResolve, resolving }) {
+function GitHubMessageCard({ message, itemUrl, isReply, canWrite, onResolve, resolving, canAgentReply, onAgentReply }) {
   return <article className={`gh-comment ${isReply ? 'is-reply' : ''}`} data-message-id={message.id}>
     <Avatar login={message.author.login} src={message.author.avatarUrl} size="small" />
     <div className="gh-comment-main">
@@ -68,7 +69,10 @@ function GitHubMessageCard({ message, itemUrl, isReply, canWrite, onResolve, res
       </div>
       {!isReply && message.kind === 'review_comment' && <div className="gh-comment-context"><ReviewCode message={message} itemUrl={itemUrl} /></div>}
       {message.body && <div className="gh-comment-body"><Markdown text={message.body} /></div>}
-      {!isReply && message.canResolve && canWrite && <div className="gh-comment-actions"><button type="button" className="text-button" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button></div>}
+      {((canAgentReply && REPLYABLE_KINDS.includes(message.kind)) || (!isReply && message.canResolve && canWrite)) && <div className="gh-comment-actions">
+        {canAgentReply && REPLYABLE_KINDS.includes(message.kind) && <button type="button" className="text-button" onClick={() => onAgentReply(message)}><Sparkles size={13} />让我的 Agent 回复</button>}
+        {!isReply && message.canResolve && canWrite && <button type="button" className="text-button" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button>}
+      </div>}
     </div>
   </article>;
 }
@@ -110,7 +114,7 @@ function buildGitHubThreads(messages) {
   return items;
 }
 
-function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying, canWrite, onResolve, resolving }) {
+function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, reads, onRetry, retrying, canWrite, onResolve, resolving, canAgentReply, onAgentReply }) {
   const elementRef = useRef(null);
   const own = message.author.memberId && message.author.memberId === user.memberId;
   const mentionSelf = (message.mentions || []).some(mention => mention.isSelf);
@@ -140,7 +144,7 @@ function MessageCard({ message, user, itemUrl, expanded, onToggle, onReads, read
       {message.kind === 'review_comment' && <ReviewCode message={message} itemUrl={itemUrl} />}
       <div className={`message-body ${long && !expanded ? 'is-collapsed' : ''}`}><Markdown text={message.body || '（无正文）'} /></div>
       {message.deliveryStatus === 'failed' && <div className="message-failed"><CircleAlert size={14} /><span>{message.deliveryError === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权失效，请重新授权' : message.deliveryError === 'GITHUB_FORBIDDEN' ? '没有评论权限' : '同步到 GitHub 失败'}</span><button className="text-button" disabled={retrying} onClick={() => onRetry(message.id)}>{retrying ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}重试</button></div>}
-      <div className="message-footer">{message.canResolve && canWrite && <button type="button" className="text-button message-resolve" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button>}<button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
+      <div className="message-footer">{canAgentReply && REPLYABLE_KINDS.includes(message.kind) && <button type="button" className="text-button" onClick={() => onAgentReply(message)}><Sparkles size={13} />让我的 Agent 回复</button>}{message.canResolve && canWrite && <button type="button" className="text-button message-resolve" disabled={resolving} onClick={() => onResolve(message.id)}>{resolving ? <LoaderCircle size={13} className="spin" /> : <CheckCheck size={13} />}标记已解决</button>}<button type="button" className={`read-receipt ${message.readByMe ? 'is-read' : ''}`} onClick={() => onReads(message.id)}><Eye size={13} />{message.readCount ? `已读 ${message.readCount}` : '暂无已读'}</button></div>
       {reads?.messageId === message.id && <div className="read-list">{reads.loading ? <Spinner compact label="读取已读成员…" /> : reads.members?.length ? reads.members.map(member => <span key={member.memberId} className="read-member"><Avatar login={member.login} src={member.avatarUrl} size="tiny" />{member.displayName || member.login}</span>) : <span className="muted">还没有其他平台成员读过这条消息</span>}{reads.error && <ErrorBox compact error={reads.error} />}</div>}
     </div>
   </article>;
@@ -155,6 +159,10 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   const [reads, setReads] = useState(null);
   const [retrying, setRetrying] = useState('');
   const [resolving, setResolving] = useState('');
+  const [agentReply, setAgentReply] = useState(null);
+  const [agentIntent, setAgentIntent] = useState('');
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentError, setAgentError] = useState(null);
   const viewKey = `conversation-view:${itemId}`;
   const [view, setView] = useState(() => { try { return localStorage.getItem(viewKey) === 'timeline' ? 'timeline' : 'github'; } catch { return 'github'; } });
   const [authorFilter, setAuthorFilter] = useState('all');
@@ -178,6 +186,7 @@ export default function Conversation({ itemId, data, user, session, notify, relo
   const githubThreads = view === 'github' ? buildGitHubThreads(orderedMessages) : [];
   const canWrite = session.demo || user.githubWriteReady;
   const open = data?.item?.state === 'open';
+  const canAgentReply = Boolean(canWrite && open && session?.features?.agentAccessEnabled !== false);
   const participants = data?.item ? [data.item.author, ...(data.item.assignees || []), ...(data.item.reviewers || [])].filter(Boolean) : [];
 
   useEffect(() => { try { setDraft(localStorage.getItem(draftKey) || ''); } catch { setDraft(''); } }, [draftKey]);
@@ -239,6 +248,22 @@ export default function Conversation({ itemId, data, user, session, notify, relo
     } catch (e) { notify?.(e.message || '标记已解决失败', 'error'); }
     finally { setResolving(''); }
   }
+  function openAgentReply(message) {
+    setAgentReply(message);
+    setAgentIntent('');
+    setAgentError(null);
+  }
+  async function createAgentReply() {
+    if (!agentReply) return;
+    setAgentBusy(true); setAgentError(null);
+    try {
+      await api(`/api/items/${encodeURIComponent(itemId)}/agent-task`, { method: 'POST', body: { messageId: agentReply.id, hint: agentIntent.trim() } });
+      notify?.('已创建检视回复任务，等待你的 Agent 领取。');
+      window.dispatchEvent(new Event('aisbench-agent-task-created'));
+      setAgentReply(null); setAgentIntent('');
+    } catch (e) { setAgentError(e); }
+    finally { setAgentBusy(false); }
+  }
   const unread = data?.unread?.unread || 0;
   const moreButton = messages.length >= 50 ? <button className="btn btn-secondary btn-small conversation-more" onClick={onLoadOlder}>加载更早消息</button> : null;
   return <section className="conversation-panel">
@@ -269,12 +294,24 @@ export default function Conversation({ itemId, data, user, session, notify, relo
       <div className={`message-list ${view === 'github' ? 'is-github' : ''}`}>{orderedMessages.length ? (view === 'github'
         ? githubThreads.map(item => item.type === 'thread'
           ? <div className="gh-thread" key={item.root.id}>
-            <GitHubMessageCard message={item.root} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.root.id} />
-            {item.replies.map(reply => <GitHubMessageCard key={reply.id} message={reply} itemUrl={data?.item?.url} isReply />)}
+            <GitHubMessageCard message={item.root} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.root.id} canAgentReply={canAgentReply} onAgentReply={openAgentReply} />
+            {item.replies.map(reply => <GitHubMessageCard key={reply.id} message={reply} itemUrl={data?.item?.url} isReply canAgentReply={canAgentReply} onAgentReply={openAgentReply} />)}
           </div>
-          : <GitHubMessageCard key={item.message.id} message={item.message} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.message.id} />)
-        : orderedMessages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} />)) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
+          : <GitHubMessageCard key={item.message.id} message={item.message} itemUrl={data?.item?.url} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === item.message.id} canAgentReply={canAgentReply} onAgentReply={openAgentReply} />)
+        : orderedMessages.map(message => <MessageCard key={message.id} message={message} user={user} itemUrl={data?.item?.url} expanded={expanded.has(message.id)} onToggle={toggle} onReads={showReads} reads={reads} onRetry={retry} retrying={retrying === message.id} canWrite={canWrite} onResolve={resolveThread} resolving={resolving === message.id} canAgentReply={canAgentReply} onAgentReply={openAgentReply} />)) : <div className="conversation-empty">{messages.length ? '该用户没有消息' : '还没有评论，发送第一条消息吧。'}</div>}</div>
       {view === 'timeline' && moreButton}
     </>}
+    {agentReply && <Modal title={`让我的 Agent 回复 @${agentReply.author.login}`} onClose={() => setAgentReply(null)} wide>
+      <div className="agent-reply-target">
+        <small>{agentReply.path ? `${agentReply.path}${agentReply.line ? `:${agentReply.line}` : ''}` : '单条评论'} · @{agentReply.author.login}</small>
+        <Markdown text={agentReply.body || '（无正文）'} />
+      </div>
+      <textarea className="agent-reply-intent" rows={4} maxLength={500} value={agentIntent} onChange={event => setAgentIntent(event.target.value)} placeholder="写下你想表达的意思，例如：这里已按建议修改，原因是…；或：不同意该建议，因为…（最多 500 字）" />
+      {agentError && <ErrorBox compact error={agentError} />}
+      <div className="agent-reply-actions">
+        <button type="button" className="btn btn-primary btn-small" disabled={agentBusy || !agentIntent.trim()} onClick={createAgentReply}>{agentBusy ? <LoaderCircle size={13} className="spin" /> : <Sparkles size={13} />}创建回复任务</button>
+        <span className="muted">Agent 领取后会生成草稿，仍需你确认后才会回复到该线程。</span>
+      </div>
+    </Modal>}
   </section>;
 }

@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { addAudit, listItems } from './db.js';
 import {
   fetchIssueComments, fetchPullReviews, fetchPullReviewComments, fetchPullReviewThreads, resolveReviewThread, fetchIssueTimeline, fetchIssueDetail,
-  fetchPullRequestDetail, fetchPullCheckRuns, fetchCommitStatuses, createIssueComment, rerunGitHubWorkflow, identityId, normalizeIssue,
+  fetchPullRequestDetail, fetchPullCheckRuns, fetchCommitStatuses, createIssueComment, createPullReviewCommentReply, createPullRequestReview, rerunGitHubWorkflow, identityId, normalizeIssue,
 } from './integrations/github.js';
 import { getGitHubToken, deleteGitHubToken, markGitHubTokenVerified } from './github-tokens.js';
 
@@ -499,10 +499,31 @@ export function getMessage(db, itemId, messageId) {
   return db.prepare('SELECT * FROM item_messages WHERE item_id=? AND id=?').get(itemId, messageId);
 }
 
-export async function postPlatformMessage(db, config, { member, itemId, body, clientId, fetchImpl = fetch, bodyLimit = BODY_LIMIT }) {
+export async function postPlatformMessage(db, config, { member, itemId, body, clientId, replyTo = null, preQuoted = false, fetchImpl = fetch, bodyLimit = BODY_LIMIT }) {
   if (typeof body !== 'string' || !body.trim() || body.length > bodyLimit || body.includes('\u0000')) throw fail(400, '消息内容无效', 'INVALID_INPUT');
   const item = itemRow(db, itemId);
   if (item.state !== 'open') throw fail(409, '只在开放事项中发言', 'ITEM_CLOSED');
+  const reviewCommentId = replyTo && replyTo.kind === 'review_comment' ? String(replyTo.github_comment_id || '').replace(/^review_comment:/, '') : '';
+  let replyKey = '';
+  let remoteBody = body.trim();
+  if (replyTo) {
+    if (replyTo.remote_deleted) throw fail(400, '原评论已被删除', 'INVALID_REPLY_TARGET');
+    if (replyTo.kind === 'review_comment') {
+      if (item.kind !== 'pr' || !/^[1-9]\d*$/.test(reviewCommentId)) throw fail(400, '只能回复 PR 的行内检视意见', 'INVALID_REPLY_TARGET');
+      replyKey = reviewCommentId;
+    } else if (replyTo.kind === 'issue_comment' || replyTo.kind === 'platform') {
+      // GitHub has no threaded replies for ordinary comments: quote the target
+      // and post a normal comment that links back to it.
+      replyKey = String(replyTo.github_comment_id || '');
+      if (!replyKey) throw fail(400, '原评论尚未同步到 GitHub，暂时不能回复', 'INVALID_REPLY_TARGET');
+      if (!preQuoted) {
+        const excerpt = String(replyTo.body || '').replace(/\r/g, '').split('\n').slice(0, 4).join('\n> ');
+        remoteBody = `> 回复 @${replyTo.author_login || ''}${replyTo.url ? ` 的 [评论](${replyTo.url})` : ''}：\n> ${excerpt}\n\n${body.trim()}`;
+      }
+    } else {
+      throw fail(400, '不支持回复该消息', 'INVALID_REPLY_TARGET');
+    }
+  }
   if (clientId) {
     const existing = db.prepare('SELECT * FROM item_messages WHERE author_member_id=? AND client_id=?').get(member.id, String(clientId));
     if (existing) return db.prepare(`SELECT m.*,mem.display_name AS member_name,mem.github_login AS member_login,mem.avatar_url AS member_avatar FROM item_messages m LEFT JOIN members mem ON mem.id=m.author_member_id WHERE m.id=?`).get(existing.id);
@@ -512,24 +533,65 @@ export async function postPlatformMessage(db, config, { member, itemId, body, cl
   if (!demo && !token) throw Object.assign(fail(409, '需要授权 GitHub 评论写入权限', 'GITHUB_WRITE_AUTH_REQUIRED'), { authUrl: `/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${encodeURIComponent(item.id)}` })}` });
   const id = randomUUID();
   const at = now();
-  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,author_member_id,author_login,author_github_id,author_avatar_url,body,delivery_status,client_id,created_at,updated_at,synced_at)
-    VALUES (?,?,'platform','platform',?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, item.id, member.id, member.github_login, member.github_user_id, member.avatar_url || '', body.trim(), demo ? 'demo' : 'pending', clientId ? String(clientId) : null, at, at, at);
+  const replyKind = replyTo && reviewCommentId ? 'review_comment' : 'platform';
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,in_reply_to_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,path,line,start_line,side,diff_hunk,thread_id,delivery_status,client_id,created_at,updated_at,synced_at)
+    VALUES (?,?,'platform',?,NULL,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, item.id, replyKind, replyKey || null,
+      member.id, member.github_login, member.github_user_id, member.avatar_url || '', remoteBody,
+      replyTo?.path || null, replyTo?.line ?? null, replyTo?.start_line ?? null, replyTo?.side || null,
+      replyTo?.diff_hunk || null, replyTo?.thread_id || null, demo ? 'demo' : 'pending',
+      clientId ? String(clientId) : null, at, at, at);
   syncMentions(db, id, body);
   if (demo) return db.prepare(`SELECT m.*,mem.display_name AS member_name,mem.github_login AS member_login,mem.avatar_url AS member_avatar FROM item_messages m LEFT JOIN members mem ON mem.id=m.author_member_id WHERE m.id=?`).get(id);
   try {
-    const created = await createIssueComment({ repo: config.repo, number: item.number, token, body: body.trim(), fetchImpl });
+    const created = replyTo
+      ? reviewCommentId
+        ? await createPullReviewCommentReply({ repo: config.repo, number: item.number, commentId: reviewCommentId, token, body: remoteBody, fetchImpl })
+        : await createIssueComment({ repo: config.repo, number: item.number, token, body: remoteBody, fetchImpl })
+      : await createIssueComment({ repo: config.repo, number: item.number, token, body: remoteBody, fetchImpl });
+    const remoteKey = reviewCommentId ? `review_comment:${created.id}` : `comment:${created.id}`;
     db.prepare('UPDATE item_messages SET github_comment_id=?,url=?,created_at=?,updated_at=?,delivery_status=? WHERE id=?')
-      .run(`comment:${created.id}`, created.html_url, created.created_at, created.created_at, 'synced', id);
+      .run(remoteKey, created.html_url, created.created_at, created.created_at, 'synced', id);
     markGitHubTokenVerified(db, member.id);
-    addAudit(db, { actorId: member.id, action: 'comment.create', targetType: 'item', targetId: item.id, after: { messageId: id, githubCommentId: String(created.id) } });
+    addAudit(db, { actorId: member.id, action: reviewCommentId ? 'review_comment.reply' : replyTo ? 'comment.reply' : 'comment.create', targetType: 'item', targetId: item.id, after: { messageId: id, githubCommentId: String(created.id) }, requestId: null });
     return db.prepare(`SELECT m.*,mem.display_name AS member_name,mem.github_login AS member_login,mem.avatar_url AS member_avatar FROM item_messages m LEFT JOIN members mem ON mem.id=m.author_member_id WHERE m.id=?`).get(id);
   } catch (error) {
     const code = error.status === 401 ? 'GITHUB_TOKEN_INVALID' : error.status === 403 ? 'GITHUB_FORBIDDEN' : error.status === 429 ? 'GITHUB_RATE_LIMITED' : 'GITHUB_UNAVAILABLE';
     db.prepare('UPDATE item_messages SET delivery_status=?,delivery_error=? WHERE id=?').run('failed', code, id);
     if (code === 'GITHUB_TOKEN_INVALID') deleteGitHubToken(db, member.id);
     const status = code === 'GITHUB_TOKEN_INVALID' ? 409 : code === 'GITHUB_RATE_LIMITED' ? 429 : 502;
-    throw Object.assign(fail(status, code === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权已失效，请重新授权' : code === 'GITHUB_FORBIDDEN' ? '没有向该仓库评论的 GitHub 权限' : code === 'GITHUB_RATE_LIMITED' ? 'GitHub 接口限流，请稍后重试' : 'GitHub 评论发送失败，请重试', code), { messageId: id, retryAt: error.retryAt });
+    throw Object.assign(fail(status, code === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权已失效，请重新授权' : code === 'GITHUB_FORBIDDEN' ? '没有向该仓库评论的 GitHub 权限' : code === 'GITHUB_RATE_LIMITED' ? 'GitHub 接口限流，请稍后重试' : (replyTo ? 'GitHub 检视回复发送失败，请重试' : 'GitHub 评论发送失败，请重试'), code), { messageId: id, retryAt: error.retryAt });
+  }
+}
+
+export async function postPlatformReview(db, config, { member, itemId, body, comments, fetchImpl = fetch }) {
+  const item = itemRow(db, itemId);
+  if (item.kind !== 'pr') throw fail(400, '只有 PR 可以提交行内检视', 'INVALID_REVIEW_TARGET');
+  if (item.state !== 'open') throw fail(409, '只在开放 PR 中检视', 'ITEM_CLOSED');
+  if (!Array.isArray(comments) || comments.length < 1 || comments.length > 20) throw fail(400, '至少需要一条行内意见', 'INVALID_REVIEW_COMMENTS');
+  const demo = config.demo;
+  const token = demo ? null : getGitHubToken(db, member.id, config);
+  if (!demo && !token) throw Object.assign(fail(409, '需要授权 GitHub 评论写入权限', 'GITHUB_WRITE_AUTH_REQUIRED'), { authUrl: `/auth/github?${new URLSearchParams({ returnTo: `/workspace/items/${encodeURIComponent(item.id)}` })}` });
+  const id = randomUUID();
+  const at = now();
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_member_id,author_login,author_github_id,author_avatar_url,body,url,state,delivery_status,created_at,updated_at,synced_at)
+    VALUES (?,?,'platform','review',NULL,?,?,?,?,?,NULL,'COMMENTED',?,?,?,?)`)
+    .run(id, item.id, member.id, member.github_login, member.github_user_id, member.avatar_url || '', body, demo ? 'demo' : 'pending', at, at, at);
+  syncMentions(db, id, body);
+  if (demo) return db.prepare(`SELECT m.*,mem.display_name AS member_name,mem.github_login AS member_login,mem.avatar_url AS member_avatar FROM item_messages m LEFT JOIN members mem ON mem.id=m.author_member_id WHERE m.id=?`).get(id);
+  try {
+    const created = await createPullRequestReview({ repo: config.repo, number: item.number, token, body, comments, fetchImpl });
+    db.prepare('UPDATE item_messages SET github_comment_id=?,url=?,state=?,delivery_status=? WHERE id=?')
+      .run(`review:${created.id}`, created.html_url, created.state || 'COMMENTED', 'synced', id);
+    markGitHubTokenVerified(db, member.id);
+    addAudit(db, { actorId: member.id, action: 'review.create', targetType: 'item', targetId: item.id, after: { messageId: id, reviewId: String(created.id), comments: comments.length }, requestId: null });
+    return db.prepare(`SELECT m.*,mem.display_name AS member_name,mem.github_login AS member_login,mem.avatar_url AS member_avatar FROM item_messages m LEFT JOIN members mem ON mem.id=m.author_member_id WHERE m.id=?`).get(id);
+  } catch (error) {
+    const code = error.status === 401 ? 'GITHUB_TOKEN_INVALID' : error.status === 403 ? 'GITHUB_FORBIDDEN' : error.status === 429 ? 'GITHUB_RATE_LIMITED' : error.status === 422 ? 'GITHUB_REVIEW_INVALID' : 'GITHUB_UNAVAILABLE';
+    db.prepare('UPDATE item_messages SET delivery_status=?,delivery_error=? WHERE id=?').run('failed', code, id);
+    if (code === 'GITHUB_TOKEN_INVALID') deleteGitHubToken(db, member.id);
+    const status = code === 'GITHUB_TOKEN_INVALID' ? 409 : code === 'GITHUB_RATE_LIMITED' ? 429 : code === 'GITHUB_REVIEW_INVALID' ? 422 : 502;
+    throw Object.assign(fail(status, code === 'GITHUB_TOKEN_INVALID' ? 'GitHub 授权已失效，请重新授权' : code === 'GITHUB_FORBIDDEN' ? '没有向该仓库提交检视的 GitHub 权限' : code === 'GITHUB_RATE_LIMITED' ? 'GitHub 接口限流，请稍后重试' : code === 'GITHUB_REVIEW_INVALID' ? '行内意见定位无效（文件或行号不在 PR 变更中），请让 Agent 重新生成草稿' : 'GitHub 检视提交失败，请重试', code), { messageId: id, retryAt: error.retryAt });
   }
 }
 
@@ -537,8 +599,12 @@ export async function retryPlatformMessage(db, config, { member, itemId, message
   const row = getMessage(db, itemId, messageId);
   if (!row || row.source !== 'platform' || row.author_member_id !== member.id) throw fail(404, '消息不存在', 'NOT_FOUND');
   if (row.delivery_status !== 'failed' || row.github_comment_id) throw fail(409, '该消息不需要重试', 'NOT_RETRYABLE');
+  const replyTo = row.in_reply_to_id
+    ? db.prepare('SELECT * FROM item_messages WHERE item_id=? AND (github_comment_id=? OR github_comment_id=?)').get(itemId, `review_comment:${row.in_reply_to_id}`, row.in_reply_to_id)
+    : null;
+  if (row.in_reply_to_id && !replyTo) throw fail(409, '原检视意见已不可用，请重新创建回复任务', 'REPLY_TARGET_MISSING');
   db.prepare('DELETE FROM item_messages WHERE id=?').run(messageId);
-  return postPlatformMessage(db, config, { member, itemId, body: row.body, clientId: row.client_id, fetchImpl });
+  return postPlatformMessage(db, config, { member, itemId, body: row.body, clientId: row.client_id, replyTo, preQuoted: Boolean(replyTo && replyTo.kind !== 'review_comment'), fetchImpl });
 }
 
 const RESOLVE_MESSAGES = {

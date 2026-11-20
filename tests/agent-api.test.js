@@ -39,11 +39,27 @@ async function agentRequest(base, token, route, method = 'GET', body) {
 
 async function setup(t, { item = testItem(), config = {}, agentAdaptor, githubToken = true } = {}) {
   const comments = [];
+  const replies = [];
+  const reviews = [];
   const fetchImpl = async (url, options = {}) => {
     const target = String(url);
+    if (/\/pulls\/(?:9100|9504)\/files\?/.test(target) && options.method === 'GET') {
+      return new Response(JSON.stringify([
+        { filename: 'tools/config.py', status: 'modified', additions: 2, deletions: 1, changes: 3, patch: '@@ -1,2 +1,3 @@\n-old\n+new' },
+        { filename: 'docs/readme.md', status: 'added', additions: 1, deletions: 0, changes: 1, patch: '@@ -0,0 +1,1 @@\n+hello' },
+      ]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (/\/pulls\/\d+\/reviews$/.test(target) && options.method === 'POST') {
+      reviews.push({ url: target, body: JSON.parse(options.body || '{}'), authorization: options.headers?.Authorization || options.headers?.authorization });
+      return new Response(JSON.stringify({ id: 777, html_url: 'https://github.com/AISBench/benchmark/pull/9504#pullrequestreview-777', state: 'COMMENTED' }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (/\/pulls\/\d+\/comments\/555\/replies$/.test(target) && options.method === 'POST') {
+      replies.push({ url: target, body: JSON.parse(options.body || '{}'), authorization: options.headers?.Authorization || options.headers?.authorization });
+      return new Response(JSON.stringify({ id: 999, html_url: 'https://github.com/AISBench/benchmark/pull/9502#discussion_r999', created_at: new Date().toISOString(), in_reply_to_id: 555 }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }
     if (target.includes('/issues/101/comments') && options.method === 'POST') {
       comments.push({ url: target, body: JSON.parse(options.body || '{}'), authorization: options.headers?.Authorization || options.headers?.authorization });
-      return new Response(JSON.stringify({ id: 9001, html_url: 'https://github.com/AISBench/benchmark/issues/101#issuecomment-9001', created_at: new Date().toISOString() }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ id: 9101, html_url: 'https://github.com/AISBench/benchmark/issues/101#issuecomment-9101', created_at: new Date().toISOString() }), { status: 201, headers: { 'Content-Type': 'application/json' } });
     }
     throw new Error(`Unexpected external HTTP: ${target}`);
   };
@@ -55,7 +71,7 @@ async function setup(t, { item = testItem(), config = {}, agentAdaptor, githubTo
   const created = await session.request('/api/agent/tokens', 'POST', { name: 'my agent' });
   assert.equal(created.status, 201);
   if (githubToken) saveGitHubToken(fixture.db, { memberId: member.id, login: 'alice', githubUserId: '501', token: 'member-token', scopes: 'public_repo' }, fixture.config);
-  return { ...fixture, member, session, token: created.data.token, tokenId: created.data.id, comments };
+  return { ...fixture, member, session, token: created.data.token, tokenId: created.data.id, comments, replies, reviews };
 }
 
 test('agent token is shown once, listed with prefix, resolvable and revocable', async t => {
@@ -116,6 +132,215 @@ test('task lifecycle: create, list with token, claim idempotently, submit draft,
   const again = await agentRequest(base, token, `/api/agent/tasks/${taskId}/submit`, 'POST', { draft });
   assert.equal(again.status, 409);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM agent_drafts').get().n, 1);
+});
+
+test('pull request review task context includes PR metadata and file patches', async t => {
+  const item = {
+    ...testItem(), id: 'github:9100', number: 9100, kind: 'pr', title: 'Fix config loading',
+    url: 'https://github.com/AISBench/benchmark/pull/9100',
+    reviewers: ['reviewer-chen'], reviewerIds: ['1002'], draft: false, mergeableState: 'clean',
+    headSha: 'a1b2c3d4', ciStatus: 'success',
+  };
+  const { session, token, base } = await setup(t, { item });
+  const created = await session.request('/api/items/github:9100/agent-task', 'POST', { hint: '重点看配置兼容性' });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.task.hint, '重点看配置兼容性');
+  const taskId = created.data.task.id;
+  assert.equal((await agentRequest(base, token, `/api/agent/tasks/${taskId}/claim`, 'POST', {})).status, 200);
+
+  const context = await agentRequest(base, token, `/api/agent/tasks/${taskId}/context`);
+  assert.equal(context.status, 200);
+  assert.equal(context.data.kind, 'pr');
+  assert.equal(context.data.pr.mergeableState, 'clean');
+  assert.equal(context.data.pr.ciStatus, 'success');
+  assert.deepEqual(context.data.pr.reviewers, ['reviewer-chen']);
+  assert.equal(context.data.files.length, 2);
+  assert.equal(context.data.files[0].path, 'tools/config.py');
+  assert.match(context.data.files[0].patch, /@@/);
+  assert.equal(context.data.files[1].path, 'docs/readme.md');
+  assert.equal(context.data.filesTruncated, false);
+  assert.equal(context.data.reviewGuide.summaryMaxChars, 600);
+
+  const direct = await agentRequest(base, token, '/api/agent/items/github:9100/context');
+  assert.equal(direct.status, 200);
+  assert.equal(direct.data.files.length, 2);
+});
+
+test('pull request context reports unreadable files instead of failing', async t => {
+  const item = { ...testItem(), id: 'github:9101', number: 9101, kind: 'pr', title: 'Unreadable diff' };
+  const { token, base } = await setup(t, { item });
+  const context = await agentRequest(base, token, '/api/agent/items/github:9101/context');
+  assert.equal(context.status, 200);
+  assert.equal(context.data.kind, 'pr');
+  assert.deepEqual(context.data.files, []);
+  assert.match(context.data.filesError, /无法读取该 PR 的变更文件/);
+});
+
+test('agent can draft a threaded reply to one inline review comment', async t => {
+  const item = { ...testItem(), id: 'github:9502', number: 9502, kind: 'pr', title: 'Fix race', url: 'https://github.com/AISBench/benchmark/pull/9502' };
+  const { session, token, db, base, replies, comments } = await setup(t, { item });
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_login,author_avatar_url,body,url,path,line,delivery_status,remote_deleted,created_at,updated_at,synced_at,diff_hunk,start_line,side,thread_resolved,thread_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,'synced',0,?,?,?,?,?,?,0,?)`).run(
+    'msg-review-1', 'github:9502', 'github', 'review_comment', 'review_comment:555', 'reviewer-chen', '',
+    '这里可能有并发问题', 'https://github.com/AISBench/benchmark/pull/9502#discussion_r555',
+    'tools/config.py', 12, now, now, now, '@@ -10,3 +10,4 @@', null, 'RIGHT', 'thread-1');
+
+  const created = await session.request('/api/items/github:9502/agent-task', 'POST', { messageId: 'msg-review-1', hint: '已经加了锁，说明锁的范围' });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.task.hint, '已经加了锁，说明锁的范围');
+  assert.equal(created.data.task.replyTo.reviewCommentId, '555');
+  assert.equal(created.data.task.replyTo.author, 'reviewer-chen');
+  assert.match(created.data.task.replyTo.body, /并发/);
+
+  const taskId = created.data.task.id;
+  assert.equal((await agentRequest(base, token, `/api/agent/tasks/${taskId}/claim`, 'POST', {})).status, 200);
+  const context = await agentRequest(base, token, `/api/agent/tasks/${taskId}/context`);
+  assert.equal(context.status, 200);
+  assert.equal(context.data.replyTo.reviewCommentId, '555');
+  assert.equal(context.data.replyTo.path, 'tools/config.py');
+  assert.equal(context.data.replyTo.thread.length, 1);
+  assert.match(context.data.replyTo.thread[0].body, /并发/);
+  assert.equal(context.data.task.hint, '已经加了锁，说明锁的范围');
+
+  const submitted = await agentRequest(base, token, `/api/agent/tasks/${taskId}/submit`, 'POST', {
+    draft: { comment_md: '已经加上锁保护，锁的范围覆盖整个写入路径。', model: 'm' },
+  });
+  assert.equal(submitted.status, 201);
+  const published = await session.request(`/api/agent/drafts/${submitted.data.draft.id}/publish`, 'POST', {});
+  assert.equal(published.status, 200);
+  assert.equal(replies.length, 1, 'the reply must use the review-comment replies endpoint');
+  assert.match(replies[0].url, /\/pulls\/9502\/comments\/555\/replies$/);
+  assert.equal(replies[0].authorization, 'Bearer member-token');
+  assert.match(replies[0].body.body, /本评论由 Agent/);
+  assert.equal(comments.length, 0, 'anchored replies must not create a top-level issue comment');
+
+  const row = db.prepare('SELECT kind,github_comment_id,in_reply_to_id,path,line FROM item_messages WHERE github_comment_id=?').get('review_comment:999');
+  assert.equal(row.kind, 'review_comment');
+  assert.equal(row.in_reply_to_id, '555');
+  assert.equal(row.path, 'tools/config.py');
+  assert.equal(row.line, 12);
+});
+
+test('anchored reply requires an existing PR review comment', async t => {
+  const { session } = await setup(t);
+  assert.equal((await session.request('/api/items/github:101/agent-task', 'POST', { messageId: 'missing' })).status, 400);
+});
+
+test('multiple anchored replies can run in parallel on one item', async t => {
+  const item = { ...testItem(), id: 'github:9503', number: 9503, kind: 'pr', title: 'Parallel replies' };
+  const { session, db } = await setup(t, { item });
+  const now = new Date().toISOString();
+  const insertComment = (id, remoteId, body, line) => db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_login,author_avatar_url,body,path,line,delivery_status,remote_deleted,created_at,updated_at,synced_at,thread_resolved)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,0)`).run(
+    id, 'github:9503', 'github', 'review_comment', `review_comment:${remoteId}`, 'reviewer-chen', '',
+    body, 'tools/config.py', line, 'synced', now, now, now);
+  insertComment('msg-review-2', '556', '第一条检视意见', 20);
+  insertComment('msg-review-3', '557', '第二条检视意见', 21);
+
+  assert.equal((await session.request('/api/items/github:9503/agent-task', 'POST', {})).status, 201);
+  const first = await session.request('/api/items/github:9503/agent-task', 'POST', { messageId: 'msg-review-2', hint: '回复第一条' });
+  assert.equal(first.status, 201);
+  const second = await session.request('/api/items/github:9503/agent-task', 'POST', { messageId: 'msg-review-3', hint: '回复第二条' });
+  assert.equal(second.status, 201);
+  assert.notEqual(first.data.task.id, second.data.task.id);
+
+  const duplicate = await session.request('/api/items/github:9503/agent-task', 'POST', { messageId: 'msg-review-2', hint: '重复点击' });
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.data.task.id, first.data.task.id);
+
+  const queue = await session.request('/api/items/github:9503/agent-tasks');
+  assert.equal(queue.status, 200);
+  assert.equal(queue.data.tasks.length, 3);
+  assert.equal(queue.data.tasks.filter(task => task.replyTo).length, 2);
+});
+
+test('issue comment can be answered by the caller agent with a quoted reply', async t => {
+  const { session, token, db, base, comments } = await setup(t);
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO item_messages(id,item_id,source,kind,github_comment_id,author_login,author_avatar_url,body,url,delivery_status,remote_deleted,created_at,updated_at,synced_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    'msg-issue-1', 'github:101', 'github', 'issue_comment', 'comment:321', 'reviewer-chen', '',
+    '这里的行为是否符合预期？', 'https://github.com/AISBench/benchmark/issues/101#issuecomment-321', 'synced', 0, now, now, now);
+
+  const created = await session.request('/api/items/github:101/agent-task', 'POST', { messageId: 'msg-issue-1', hint: '说明这是预期行为' });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.task.replyTo.kind, 'issue_comment');
+  assert.equal(created.data.task.replyTo.author, 'reviewer-chen');
+  const taskId = created.data.task.id;
+  assert.equal((await agentRequest(base, token, `/api/agent/tasks/${taskId}/claim`, 'POST', {})).status, 200);
+
+  const context = await agentRequest(base, token, `/api/agent/tasks/${taskId}/context`);
+  assert.equal(context.status, 200);
+  assert.equal(context.data.replyTo.kind, 'issue_comment');
+  assert.match(context.data.replyTo.body, /是否符合预期/);
+  assert.equal(context.data.task.hint, '说明这是预期行为');
+
+  const submitted = await agentRequest(base, token, `/api/agent/tasks/${taskId}/submit`, 'POST', { draft: { comment_md: '这是预期行为，原因是…', model: 'm' } });
+  assert.equal(submitted.status, 201);
+  const published = await session.request(`/api/agent/drafts/${submitted.data.draft.id}/publish`, 'POST', {});
+  assert.equal(published.status, 200);
+  assert.equal(comments.length, 1);
+  assert.match(comments[0].body.body, /^> 回复 @reviewer-chen/);
+  assert.match(comments[0].body.body, /本评论由 Agent/);
+  const row = db.prepare('SELECT kind,github_comment_id,in_reply_to_id FROM item_messages WHERE github_comment_id=?').get('comment:9101');
+  assert.equal(row.kind, 'platform');
+  assert.equal(row.in_reply_to_id, 'comment:321');
+});
+
+test('PR review draft publishes multiple line comments as one review', async t => {
+  const item = { ...testItem(), id: 'github:9504', number: 9504, kind: 'pr', title: 'Review me', url: 'https://github.com/AISBench/benchmark/pull/9504' };
+  const { session, token, db, base, reviews, comments } = await setup(t, { item });
+  const created = await session.request('/api/items/github:9504/agent-task', 'POST', { hint: '重点看并发与文档' });
+  const taskId = created.data.task.id;
+  assert.equal((await agentRequest(base, token, `/api/agent/tasks/${taskId}/claim`, 'POST', {})).status, 200);
+  const submitted = await agentRequest(base, token, `/api/agent/tasks/${taskId}/submit`, 'POST', {
+    draft: {
+      summary: '两处问题', comment_md: '检视意见如下', model: 'm',
+      comments: [
+        { path: 'tools/config.py', line: 1, side: 'RIGHT', body: '[review] [major] 这里存在并发风险\n[suggestion] 使用锁保护整个写入路径' },
+        { path: 'docs/readme.md', line: 1, side: 'RIGHT', body: '[review] [minor] 文档缺少说明\n[suggestion] 补充参数与示例' },
+      ],
+    },
+  });
+  assert.equal(submitted.status, 201);
+  assert.equal(submitted.data.draft.comments.length, 2);
+
+  const published = await session.request(`/api/agent/drafts/${submitted.data.draft.id}/publish`, 'POST', {});
+  assert.equal(published.status, 200);
+  assert.equal(reviews.length, 1, 'inline findings must be submitted as one review');
+  assert.match(reviews[0].url, /\/pulls\/9504\/reviews$/);
+  assert.equal(reviews[0].authorization, 'Bearer member-token');
+  assert.equal(reviews[0].body.event, 'COMMENT');
+  assert.equal(reviews[0].body.comments.length, 2);
+  assert.equal(reviews[0].body.comments[0].path, 'tools/config.py');
+  assert.match(reviews[0].body.body, /本评论由 Agent/);
+  assert.equal(comments.length, 0, 'a line review must not create a top-level issue comment');
+
+  const row = db.prepare('SELECT kind,state,github_comment_id FROM item_messages WHERE github_comment_id=?').get('review:777');
+  assert.equal(row.kind, 'review');
+  assert.equal(row.state, 'COMMENTED');
+});
+
+test('PR review draft requires valid line anchors', async t => {
+  const item = { ...testItem(), id: 'github:9504', number: 9504, kind: 'pr', title: 'Review me' };
+  const { session, token, base } = await setup(t, { item });
+  const created = await session.request('/api/items/github:9504/agent-task', 'POST', {});
+  const taskId = created.data.task.id;
+  assert.equal((await agentRequest(base, token, `/api/agent/tasks/${taskId}/claim`, 'POST', {})).status, 200);
+  const submit = comments => agentRequest(base, token, `/api/agent/tasks/${taskId}/submit`, 'POST', { draft: { comment_md: '摘要', comments } });
+  assert.equal((await submit([])).status, 400, 'a PR review needs at least one inline comment');
+  const invalid = await submit([{ path: 'tools/config.py', line: 999, side: 'RIGHT', body: '[review] [minor] x\n[suggestion] y' }]);
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.data.error, /行内意见定位无效/);
+  const badFormat = await submit([{ path: 'tools/config.py', line: 1, side: 'RIGHT', body: '没有按格式写' }]);
+  assert.equal(badFormat.status, 400);
+  assert.match(badFormat.data.error, /格式必须为/);
+  const longSummary = await agentRequest(base, token, `/api/agent/tasks/${taskId}/submit`, 'POST', {
+    draft: { comment_md: 'x'.repeat(601), comments: [{ path: 'tools/config.py', line: 1, side: 'RIGHT', body: '[review] [minor] x\n[suggestion] y' }] },
+  });
+  assert.equal(longSummary.status, 400);
+  assert.match(longSummary.data.error, /600/);
 });
 
 test('issue page can read the full draft inline and keeps it after publish', async t => {

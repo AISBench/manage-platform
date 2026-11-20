@@ -89,9 +89,9 @@ const AUTO_PROMPT = `检查并处理 AISBench 平台上派给我的 Agent 任务
 2. 只处理 status=queued 的任务；claimed 表示已有另一轮在处理，直接跳过；claimed 超过 30 分钟未更新可视为中断并重新领取。
 3. 没有可处理任务时直接结束，不要发送任何通知。
 4. 每轮最多处理 1 个，优先创建时间最早的：调用 aisbench_task_claim 领取。
-5. 调用 aisbench_issue_context 读取该 Issue 的白名单事实；需要时调用 aisbench_kb_search 检索 AISBench/benchmark 知识库。
-6. 基于事实生成中文处理草稿：包含排查结论、可执行的修复或验证建议，引用真实文件路径，不要编造出处。
-7. 调用 aisbench_task_submit 提交草稿；不要发布，发布由我在平台人工确认。
+5. 调用 aisbench_issue_context 读取该 Issue / PR 的白名单事实；PR 会附带变更文件与 patch。需要时调用 aisbench_kb_search 检索 AISBench/benchmark 知识库。
+6. 若任务带 replyTo，只针对该条评论 / 检视意见与线程历史写回复，严格按 hint 中我的意图表达，comments 留空；否则 PR 检视：comment_md 只写不超过 600 字的总体摘要；必须输出多条 comments，每条 body 严格为「[review] [严重程度] 具体问题」换行「[suggestion] 可行解决方式」，line 使用 @@ 头中的新文件/旧文件行号，只对改动或上下文行提意见，严重程度建议 blocker/major/minor/nit，不要只写总体概述。Issue 则给出排查结论与修复或验证建议。引用真实文件路径，不要编造出处。
+7. 调用 aisbench_task_submit 提交草稿；若返回行内意见定位无效，按错误修正 comments 后重试。不要发布，发布由我在平台人工确认。
 8. 全程不修改 GitHub、不发布评论、不执行强副作用动作。`;
 
 const TRAE_SCHEDULE = {
@@ -147,7 +147,7 @@ const HTTP_SCHEDULE = {
   steps: [
     '你的脚本定时 GET /api/agent/tasks（Authorization: Bearer 令牌）。',
     '对 status=queued 的任务 POST /api/agent/tasks/{id}/claim。',
-    'GET /api/agent/tasks/{id}/context 读取 Issue 事实，并按需调用知识库接口，用你的模型生成草稿。',
+    'GET /api/agent/tasks/{id}/context 读取 Issue / PR 事实（PR 含变更文件与 patch），并按需调用知识库接口，用你的模型生成草稿。',
     'POST /api/agent/tasks/{id}/submit 提交草稿；建议轮询间隔不小于 10 分钟。',
   ],
 };
@@ -249,7 +249,7 @@ export default function AgentHub({ session, notify }) {
     try {
       const actions = (draft.actions || []).filter((_, index) => (selected[draft.id] || []).includes(index));
       const result = await api(`/api/agent/drafts/${encodeURIComponent(draft.id)}/publish`, { method: 'POST', body: { actions } });
-      notify?.(result.demo ? '演示模式：已模拟发布。' : '已由机器人身份发布到 GitHub。');
+      notify?.(result.demo ? '演示模式：已模拟发布。' : '已由你的 GitHub 身份发布到 GitHub。');
       await loadDrafts();
     } catch (error) { notify?.(error.message, 'error'); }
     finally { setBusy(''); }
@@ -265,7 +265,7 @@ export default function AgentHub({ session, notify }) {
 
   return <>
     <div className="page-heading">
-      <div><div className="eyebrow">AGENT ACCESS</div><h1>Agent 接入</h1><p>把自己的模型 Agent 接进来：只读检索知识库、领取 Issue 任务；草稿经你人工确认后才会发布。</p></div>
+      <div><div className="eyebrow">AGENT ACCESS</div><h1>Agent 接入</h1><p>把自己的模型 Agent 接进来：只读检索知识库、领取 Issue / PR 任务；草稿经你人工确认后才会发布。</p></div>
       <div className="heading-action">
         <Badge tone={configured ? 'teal' : 'amber'}>{configured ? '知识库已连接' : '知识库未配置'}</Badge>
         <Badge tone="neutral">人工确认后发布</Badge>
@@ -313,6 +313,7 @@ export default function AgentHub({ session, notify }) {
         <p className="agent-client-path"><strong>{client.label}</strong> · {client.file}</p>
         <Snippet title={`${client.label} 配置`} code={snippet} notify={notify} />
         <p className="agent-muted">以上片段已填入当前站点地址；把令牌替换成你刚生成的即可。字段名以客户端当前版本为准，若客户端使用不同的配置键（如 <code>servers</code> / <code>context_servers</code>），按它的 MCP 导入流程粘贴命令与 env。</p>
+        <p className="agent-muted">Windows 首次使用 npx 若报 <code>ENOENT ... \AppData\Roaming\npm</code>，先执行 <code>mkdir "%APPDATA%\npm"</code>，再重启 MCP 服务。</p>
       </section>
 
       <section className="panel agent-panel">
@@ -326,7 +327,7 @@ export default function AgentHub({ session, notify }) {
 
     {tab === 'tasks' && <section className="panel agent-panel">
       <div className="panel-title-row"><div><h2><Bot size={18} />我的 Agent 任务</h2><p>Agent 提交草稿后会出现在这里；发布前请核对评论正文、引用与动作。</p></div><button className="btn btn-secondary btn-small" onClick={loadDrafts} disabled={draftsLoading}>刷新</button></div>
-      {draftError ? <div className="agent-adaptor-status is-red" role="alert"><CircleAlert size={14} />{draftError.message}</div> : draftsLoading ? <Spinner label="正在读取草稿…" /> : !drafts.length ? <Empty text="还没有 Agent 草稿。到 Issue 详情页点「交给我的 agent」创建任务。" /> : <div className="agent-draft-list">
+      {draftError ? <div className="agent-adaptor-status is-red" role="alert"><CircleAlert size={14} />{draftError.message}</div> : draftsLoading ? <Spinner label="正在读取草稿…" /> : !drafts.length ? <Empty text="还没有 Agent 草稿。到 Issue / PR 详情页点「交给我的 agent」创建任务。" /> : <div className="agent-draft-list">
         {drafts.map(draft => {
           const [tone, label] = DRAFT_STATUS[draft.status] || ['neutral', draft.status];
           const isOpen = expanded === draft.id;
@@ -337,8 +338,9 @@ export default function AgentHub({ session, notify }) {
             </button>
             {draft.publishError && <p className="agent-adaptor-status is-red"><CircleAlert size={13} />{draft.publishError}</p>}
             {isOpen && <div className="agent-draft-body">
-              <h4>评论正文</h4>
+              <h4>Review 摘要 / 评论正文</h4>
               <Markdown text={draft.commentMd} empty="（空）" />
+              {!!draft.comments?.length && <><h4>行内检视意见（{draft.comments.length} 条）</h4><div className="agent-comments">{draft.comments.map((comment, index) => <div className="agent-comment is-selected" key={index}><span><strong>{comment.path}:{comment.line} · {comment.side === 'LEFT' ? '旧代码' : '新代码'}</strong><Markdown text={comment.body} /></span></div>)}</div></>}
               {draft.rootCauseHypothesis && <><h4>根因假设</h4><p>{draft.rootCauseHypothesis}</p></>}
               {!!draft.references?.length && <><h4>引用（未自动核实）</h4><ul className="agent-refs">{draft.references.map((ref, index) => <li key={index}><Badge tone="neutral">{ref.kind}</Badge>{ref.url ? <a href={ref.url} target="_blank" rel="noreferrer">{ref.path || ref.url}<ExternalLink size={12} /></a> : <code>{ref.path}</code>}{ref.snippet && <span>{ref.snippet}</span>}</li>)}</ul></>}
               {!!draft.actions?.length && <><h4>强副作用动作（勾选后才会执行）</h4><div className="agent-actions">{draft.actions.map((action, index) => <label key={index} className="agent-action"><input type="checkbox" disabled={draft.status !== 'pending'} checked={(selected[draft.id] || []).includes(index)} onChange={() => toggleAction(draft.id, index)} /><span><strong>{ACTION_LABELS[action.kind] || action.kind}{action.value ? `：${action.value}` : ''}</strong>{action.reason && <small>{action.reason}</small>}</span></label>)}</div></>}

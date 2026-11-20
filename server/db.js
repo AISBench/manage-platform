@@ -30,7 +30,7 @@ export function openDatabase(filename) {
     try {
       db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 13)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 16)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -286,6 +286,28 @@ export function openDatabase(filename) {
         addColumn(db, 'agent_drafts', 'agent_name', "TEXT NOT NULL DEFAULT ''");
         addColumn(db, 'agent_drafts', 'agent_token_prefix', "TEXT NOT NULL DEFAULT ''");
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(13, new Date().toISOString());
+      }
+      if (!applied.has(14)) {
+        // Anchor an Agent task to one inline review comment so the Agent can
+        // draft a reply inside that thread instead of reviewing the whole PR.
+        addColumn(db, 'agent_tasks', 'message_id', 'TEXT');
+        addColumn(db, 'agent_tasks', 'review_comment_id', 'TEXT');
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(14, new Date().toISOString());
+      }
+      if (!applied.has(15)) {
+        // A PR review draft carries several line-anchored findings; they are
+        // published together as one GitHub review after human confirmation.
+        addColumn(db, 'agent_drafts', 'comments_json', "TEXT NOT NULL DEFAULT '[]'");
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(15, new Date().toISOString());
+      }
+      if (!applied.has(16)) {
+        // One member may reply to many comments in parallel on the same item;
+        // only the exact same anchor stays idempotent.
+        db.exec(`DROP INDEX IF EXISTS agent_tasks_active;
+          CREATE UNIQUE INDEX IF NOT EXISTS agent_tasks_active_anchor
+          ON agent_tasks(item_id, member_id, COALESCE(message_id, ''))
+          WHERE status IN ('queued','claimed','submitted');`);
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(16, new Date().toISOString());
       }
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));

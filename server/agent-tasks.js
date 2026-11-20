@@ -29,22 +29,61 @@ function expireStale(db, memberId) {
     .run(nowIso(), memberId, nowIso());
 }
 
-export function createTask(db, { itemId, repo, number, memberId, hint = '' }) {
+export function createTask(db, { itemId, repo, number, memberId, hint = '', messageId = '', reviewCommentId = '' }) {
   expireStale(db, memberId);
-  const existing = db.prepare(`SELECT * FROM agent_tasks WHERE item_id=? AND member_id=? AND status IN (${ACTIVE.map(() => '?').join(',')})`)
-    .get(itemId, memberId, ...ACTIVE);
+  const existing = db.prepare(`SELECT * FROM agent_tasks WHERE item_id=? AND member_id=? AND COALESCE(message_id,'')=? AND status IN (${ACTIVE.map(() => '?').join(',')})`)
+    .get(itemId, memberId, messageId || '', ...ACTIVE);
   if (existing) return { task: taskView(db, existing), created: false };
   const id = randomUUID();
   const now = nowIso();
-  db.prepare('INSERT INTO agent_tasks(id,item_id,repo,number,member_id,hint,status,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .run(id, itemId, repo, number, memberId, hint || '', 'queued', now, now, new Date(Date.now() + TASK_TTL_MS).toISOString());
+  try {
+    db.prepare('INSERT INTO agent_tasks(id,item_id,repo,number,member_id,hint,message_id,review_comment_id,status,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, itemId, repo, number, memberId, hint || '', messageId || null, reviewCommentId || null, 'queued', now, now, new Date(Date.now() + TASK_TTL_MS).toISOString());
+  } catch (error) {
+    // A concurrent click on the same anchor may have won the unique index.
+    if (String(error?.message || '').includes('UNIQUE')) {
+      const row = db.prepare(`SELECT * FROM agent_tasks WHERE item_id=? AND member_id=? AND COALESCE(message_id,'')=? AND status IN (${ACTIVE.map(() => '?').join(',')})`)
+        .get(itemId, memberId, messageId || '', ...ACTIVE);
+      if (row) return { task: taskView(db, row), created: false };
+    }
+    throw error;
+  }
   return { task: taskView(db, db.prepare('SELECT * FROM agent_tasks WHERE id=?').get(id)), created: true };
+}
+
+export function listTasksForItem(db, memberId, itemId, limit = 50) {
+  expireStale(db, memberId);
+  return db.prepare('SELECT * FROM agent_tasks WHERE member_id=? AND item_id=? ORDER BY created_at DESC LIMIT ?')
+    .all(memberId, itemId, Math.max(1, Math.min(100, Number(limit) || 50)))
+    .map(row => {
+      const draft = db.prepare('SELECT id FROM agent_drafts WHERE task_id=?').get(row.id);
+      return { ...taskView(db, row), draft: draft ? getDraft(db, draft.id, memberId) : null };
+    });
+}
+
+function replyView(db, row) {
+  if (!row.message_id) return null;
+  const message = db.prepare('SELECT id,kind,author_login,body,path,line,url,created_at FROM item_messages WHERE id=?').get(row.message_id);
+  if (!message) return { messageId: row.message_id, reviewCommentId: row.review_comment_id || '', kind: '' };
+  return {
+    messageId: message.id,
+    kind: message.kind || '',
+    reviewCommentId: row.review_comment_id || '',
+    author: message.author_login || '',
+    body: String(message.body || '').slice(0, 500),
+    path: message.path || '',
+    line: message.line ?? null,
+    url: message.url || '',
+    createdAt: message.created_at,
+  };
 }
 
 function taskView(db, row) {
   return {
     id: row.id, itemId: row.item_id, repo: row.repo, number: Number(row.number), hint: row.hint || '',
     status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, expiresAt: row.expires_at,
+    messageId: row.message_id || '', reviewCommentId: row.review_comment_id || '',
+    replyTo: replyView(db, row),
     item: itemSummary(db, row.item_id),
   };
 }
@@ -95,9 +134,9 @@ export function submitDraft(db, { taskId, memberId, draft, agentName = '', agent
   const now = nowIso();
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.prepare(`INSERT INTO agent_drafts(id,task_id,member_id,summary,root_cause_hypothesis,comment_md,actions_json,references_json,confidence,model,agent_name,agent_token_prefix,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`)
-      .run(id, taskId, memberId, draft.summary || '', draft.root_cause_hypothesis || '', draft.comment_md, JSON.stringify(draft.actions || []), JSON.stringify(draft.references || []), draft.confidence || 0, draft.model || '', String(agentName || '').slice(0, 120), String(agentTokenPrefix || '').slice(0, 20), now, now);
+    db.prepare(`INSERT INTO agent_drafts(id,task_id,member_id,summary,root_cause_hypothesis,comment_md,comments_json,actions_json,references_json,confidence,model,agent_name,agent_token_prefix,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`)
+      .run(id, taskId, memberId, draft.summary || '', draft.root_cause_hypothesis || '', draft.comment_md, JSON.stringify(draft.comments || []), JSON.stringify(draft.actions || []), JSON.stringify(draft.references || []), draft.confidence || 0, draft.model || '', String(agentName || '').slice(0, 120), String(agentTokenPrefix || '').slice(0, 20), now, now);
     db.prepare("UPDATE agent_tasks SET status='submitted',updated_at=? WHERE id=?").run(now, taskId);
     db.exec('COMMIT');
   } catch (error) {
@@ -113,6 +152,7 @@ function draftView(db, row, task) {
   return {
     id: row.id, taskId: row.task_id, memberId: row.member_id, summary: row.summary,
     rootCauseHypothesis: row.root_cause_hypothesis, commentMd: row.comment_md,
+    comments: parse(row.comments_json, []),
     actions: parse(row.actions_json, []), references: parse(row.references_json, []),
     confidence: Number(row.confidence) || 0, model: row.model, status: row.status,
     agentName: row.agent_name || '', agentTokenPrefix: row.agent_token_prefix || '',
@@ -120,6 +160,8 @@ function draftView(db, row, task) {
     createdAt: row.created_at, updatedAt: row.updated_at,
     task: task ? {
       id: task.id, itemId: task.item_id, repo: task.repo, number: Number(task.number),
+      messageId: task.message_id || '', reviewCommentId: task.review_comment_id || '',
+      replyTo: replyView(db, task),
       item: itemSummary(db, task.item_id),
     } : null,
   };

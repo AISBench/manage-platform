@@ -26,15 +26,34 @@ const githubUrl = value => {
 
 const safePath = value => value === '' || (!value.startsWith('/') && !value.split('/').includes('..') && !/^[A-Za-z]:/.test(value));
 
+// One line-anchored finding of a PR review. `line` is the new-file number for
+// RIGHT and the old-file number for LEFT, exactly as GitHub anchors reviews.
+const inlineCommentSchema = z.object({
+  path: z.string().trim().min(1).max(500),
+  line: z.number().int().min(1).max(1000000),
+  side: z.enum(['LEFT', 'RIGHT']).default('RIGHT'),
+  start_line: z.number().int().min(1).max(1000000).optional(),
+  body: z.string().trim().min(1).max(4000),
+}).strict();
+
 export const agentDraftSchema = z.object({
   summary: z.string().max(500).default(''),
   root_cause_hypothesis: z.string().max(2000).default(''),
   comment_md: z.string().trim().min(1).max(20000),
+  comments: z.array(inlineCommentSchema).max(20).default([]),
   actions: z.array(actionSchema).max(10).default([]),
   references: z.array(referenceSchema).max(20).default([]),
   confidence: z.number().min(0).max(1).default(0),
   model: z.string().max(100).default(''),
 }).strict().superRefine((draft, ctx) => {
+  draft.comments.forEach((comment, index) => {
+    if (!safePath(comment.path)) {
+      ctx.addIssue({ code: 'custom', path: ['comments', index, 'path'], message: '行内意见路径不能是绝对路径或包含 ..' });
+    }
+    if (comment.start_line && comment.start_line > comment.line) {
+      ctx.addIssue({ code: 'custom', path: ['comments', index, 'start_line'], message: 'start_line 不能大于 line' });
+    }
+  });
   draft.actions.forEach((action, index) => {
     if (['add_label', 'remove_label', 'assign'].includes(action.kind) && !action.value.trim()) {
       ctx.addIssue({ code: 'custom', path: ['actions', index, 'value'], message: `${action.kind} 需要非空 value` });

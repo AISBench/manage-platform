@@ -283,6 +283,28 @@
 .agent-adaptor-hint{display:block;width:calc(100% - 36px);margin:0 18px 16px;padding:8px 10px;border:1px solid #e4eaed;border-radius:6px;font-size:9px;line-height:1.6;color:#5f7280;resize:vertical;font-family:inherit}
 .agent-adaptor-hint:focus{outline:none;border-color:#9fcbbd;box-shadow:0 0 0 3px #2f9e8514}
 .detail-card .agent-adaptor-meta~.external-text-link{margin:8px 18px 0;display:inline-block}
+.agent-reply-target{margin:12px 0;padding:10px 12px;border:1px solid #e8f0ed;border-radius:6px;background:#f7faf9}
+.agent-reply-target small{display:block;margin-bottom:6px;color:#8f9da7;font-size:9px}
+.agent-reply-target p{font-size:10px;line-height:1.7;color:#5f7280;margin:0}
+.agent-reply-intent{display:block;width:100%;box-sizing:border-box;margin:10px 0;padding:9px 11px;border:1px solid #e4eaed;border-radius:6px;font-size:10px;line-height:1.7;color:#5f7280;resize:vertical;font-family:inherit}
+.agent-reply-intent:focus{outline:none;border-color:#9fcbbd;box-shadow:0 0 0 3px #2f9e8514}
+.agent-reply-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.agent-reply-actions .muted{font-size:9px;color:#8f9da7}
+.agent-comments{display:flex;flex-direction:column;gap:8px;margin:8px 0 4px}
+.agent-comment{display:flex;gap:8px;padding:9px 11px;border:1px solid #e8f0ed;border-radius:6px;background:#fbfcfc}
+.agent-comment.is-selected{border-color:#cfe7dd;background:#f7fbf9}
+.agent-comment input{margin-top:2px}
+.agent-comment span{flex:1;min-width:0;font-size:10px;line-height:1.7;color:#5f7280}
+.agent-comment strong{display:block;font-size:9px;color:#4b7d6f;margin-bottom:3px}
+.agent-task-list{display:flex;flex-direction:column;gap:8px;margin:10px 18px 0}
+.agent-task-row{padding:10px 12px;border:1px solid #e8f0ed;border-radius:6px;background:#fbfcfc}
+.agent-task-row-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.agent-task-row-head strong{font-size:10px;color:#4b7d6f;font-weight:600}
+.agent-task-row .agent-adaptor-meta{padding:0;margin:2px 0}
+.agent-task-row-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:6px}
+.agent-task-history{margin:10px 18px 0}
+.agent-task-history summary{cursor:pointer;font-size:9px;color:#8f9da7;padding:4px 0}
+.agent-task-hub-link{margin:10px 18px 14px;display:inline-block}
 
 
 
