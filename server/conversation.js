@@ -499,8 +499,8 @@ export function getMessage(db, itemId, messageId) {
   return db.prepare('SELECT * FROM item_messages WHERE item_id=? AND id=?').get(itemId, messageId);
 }
 
-export async function postPlatformMessage(db, config, { member, itemId, body, clientId, fetchImpl = fetch }) {
-  if (typeof body !== 'string' || !body.trim() || body.length > BODY_LIMIT || body.includes('\u0000')) throw fail(400, '消息内容无效', 'INVALID_INPUT');
+export async function postPlatformMessage(db, config, { member, itemId, body, clientId, fetchImpl = fetch, bodyLimit = BODY_LIMIT }) {
+  if (typeof body !== 'string' || !body.trim() || body.length > bodyLimit || body.includes('\u0000')) throw fail(400, '消息内容无效', 'INVALID_INPUT');
   const item = itemRow(db, itemId);
   if (item.state !== 'open') throw fail(409, '只在开放事项中发言', 'ITEM_CLOSED');
   if (clientId) {

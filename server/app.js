@@ -17,6 +17,11 @@ import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
 import { saveGitHubToken, deleteGitHubToken } from './github-tokens.js';
 import { listConversation, syncItemConversation, postPlatformMessage, retryPlatformMessage, resolveItemReviewThread, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto } from './conversation.js';
 import { listLabels, labelWriteAccess, updateItemLabels, hasLabel } from './labels.js';
+import { createIssueMasterClient } from './integrations/issue-master.js';
+import { buildItemContext } from './agent-context.js';
+import { agentDraftSchema, agentActionSchema, formatDraftError } from './agent-draft.js';
+import { createAgentToken, listAgentTokens, revokeAgentToken, resolveAgentToken } from './agent-tokens.js';
+import { createTask as createAgentTask, listTasksForMember, listQueuedForToken, getTask as getAgentTask, claimTask as claimAgentTask, submitDraft as submitAgentDraft, getDraft as getAgentDraft, getLatestDraftForItem, listDraftsForMember, markPublished, markPublishError, markDeclined } from './agent-tasks.js';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const version=z.number().int().positive(), id=z.string().min(1).max(100), short=z.string().trim().max(120);
@@ -36,6 +41,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   if(config.demo) seedDemo(db,config.repo);
   db.exec("UPDATE notifications SET status='pending' WHERE status='sending'");
   const services=createServices(db,config,{...integrations,fetchImpl});
+  const issueMaster=integrations.issueMaster || createIssueMasterClient(config,{fetchImpl});
   const app=express();app.disable('x-powered-by');app.set('trust proxy',config.trustProxy || false);
   const allItems=()=>listItems(db,Date.now(),config.feishuAppId || '');
   function withUnread(items,memberId) {
@@ -143,9 +149,74 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
     const policy=getAccessPolicy(db);
-    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuOAuthConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuWebhookConfigured:!!config.tokenEncryptionKey&&!config.demo,repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true}});
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuOAuthConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuWebhookConfigured:!!config.tokenEncryptionKey&&!config.demo,issueMasterConfigured:Boolean(config.issueMasterUrl&&config.issueMasterToken),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true,agentAccessEnabled:config.agentEnabled,agentMcp:{command:config.agentMcpCommand,args:config.agentMcpArgs}}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
+  // ---- Agent access: personal token routes (Bearer, no browser session) ----
+  // Registered before the session/CSRF guards so an external Agent never needs
+  // a cookie. Tokens are personal, revocable and only stored as SHA-256 hashes.
+  const agentEnabled=Boolean(config.agentEnabled);
+  const agentNotFound=res=>res.status(404).json({error:'Not found'});
+  function agentBearer(req) {
+    const header=req.headers.authorization || '';
+    if(header.startsWith('Bearer ')) return header.slice(7).trim();
+    const direct=req.headers['x-agent-token'];
+    return typeof direct==='string'?direct.trim():'';
+  }
+  function requireAgentToken(req,res,next) {
+    if(!agentEnabled) return agentNotFound(res);
+    const agent=resolveAgentToken(db,agentBearer(req));
+    if(!agent) return res.status(401).json({error:'AGENT_TOKEN_INVALID'});
+    req.agent=agent;next();
+  }
+  const agentLimiter=rateLimit({windowMs:60000,limit:120,keyGenerator:req=>`agent:${req.agent.tokenId}`});
+  const agentItemContext=itemId=>{
+    const item=allItems().find(entry=>entry.id===itemId);
+    return item?buildItemContext(db,item,{repo:config.repo}):null;
+  };
+  app.use('/api/agent',(req,res,next)=>{if(!agentEnabled) return agentNotFound(res);next();});
+  if(agentEnabled) {
+    app.get('/api/agent/me',requireAgentToken,(req,res)=>res.json({memberId:req.agent.memberId,login:req.agent.login,name:req.agent.name,scopes:req.agent.scopes}));
+    app.get('/api/agent/tasks',requireAgentToken,agentLimiter,(req,res)=>{z.object({}).strict().parse(req.query);res.json({tasks:listQueuedForToken(db,req.agent.memberId)});});
+    app.post('/api/agent/tasks/:id/claim',requireAgentToken,agentLimiter,(req,res)=>{
+      z.object({}).strict().parse(req.body||{});
+      if(!claimAgentTask(db,req.params.id,req.agent.memberId)) throw fail(404,'任务不存在或已过期');
+      res.json({ok:true});
+    });
+    app.get('/api/agent/tasks/:id/context',requireAgentToken,agentLimiter,(req,res)=>{
+      z.object({}).strict().parse(req.query);
+      const task=getAgentTask(db,req.params.id,req.agent.memberId);
+      if(!task) throw fail(404,'任务不存在');
+      const context=agentItemContext(task.itemId);
+      if(!context) throw fail(404,'事务不存在');
+      res.json(context);
+    });
+    app.get('/api/agent/items/:id/context',requireAgentToken,agentLimiter,(req,res)=>{
+      z.object({}).strict().parse(req.query);
+      const item=allItems().find(entry=>entry.id===req.params.id);
+      if(!item) throw fail(404,'事务不存在');
+      if(item.state!=='open') throw fail(400,'只有开放事项可以获取 Agent 上下文');
+      res.json(buildItemContext(db,item,{repo:config.repo}));
+    });
+    app.post('/api/agent/kb/search',requireAgentToken,agentLimiter,async(req,res)=>{
+      const body=z.object({repo:z.string().trim().max(200).min(1),question:z.string().trim().min(1).max(2000),topK:z.number().int().min(1).max(12).optional()}).strict().parse(req.body||{});
+      if(config.demo) throw fail(503,'演示模式不连接知识库（AGENT_DEMO）');
+      res.json(await issueMaster.searchKb({repo:body.repo,question:body.question,topK:body.topK}));
+    });
+    app.get('/api/agent/kb/wiki',requireAgentToken,agentLimiter,async(req,res)=>{
+      const query=z.object({repo:z.string().trim().max(200).min(1),topic:z.string().trim().min(1).max(200)}).strict().parse(req.query);
+      if(config.demo) throw fail(503,'演示模式不连接知识库（AGENT_DEMO）');
+      res.json(await issueMaster.wiki({repo:query.repo,topic:query.topic}));
+    });
+    app.post('/api/agent/tasks/:id/submit',requireAgentToken,agentLimiter,(req,res)=>{
+      const payload=req.body?.draft ?? req.body;
+      const parsed=agentDraftSchema.safeParse(payload);
+      if(!parsed.success) throw fail(400,formatDraftError(parsed.error));
+      const draft=submitAgentDraft(db,{taskId:req.params.id,memberId:req.agent.memberId,draft:parsed.data,agentName:req.agent.agentName,agentTokenPrefix:req.agent.tokenPrefix});
+      addAudit(db,{actorId:req.agent.memberId,action:'agent.draft.submit',targetType:'agent_draft',targetId:draft.id,after:{taskId:req.params.id},requestId:req.requestId});
+      res.status(201).json({draft});
+    });
+  }
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
   app.get('/api/public/items',(req,res)=>{
     const query=z.object({kind:z.enum(['pr','issue']).optional(),state:z.enum(['open','closed','all']).default('all'),q:z.string().max(200).default(''),page:z.coerce.number().int().min(1).max(100000).default(1),pageSize:z.coerce.number().int().min(1).max(100).default(20)}).strict().parse(req.query);res.json(services.publicPortal.list(query));
@@ -323,7 +394,118 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   });
   app.patch('/api/items/:id',(req,res)=>res.json({item:transact(()=>mutateItem(req,req.params.id,itemPatch.parse(req.body)))}));
   app.post('/api/items/:id/claim',(req,res)=>{const body=z.object({version}).strict().parse(req.body);res.json({item:transact(()=>mutateItem(req,req.params.id,body,{claim:true}))});});
+  function itemForRequest(req) {const item=allItems().find(i=>i.id===req.params.id);if(!item) throw fail(404,'事务不存在');return item;}
+  // Admin-only bridge to issue_master. Triggering only prepares a draft; publishing
+  // still requires a human confirmation on the Feishu card.
+  app.post('/api/items/:id/issue-master/handle',requireAdmin,rateLimit({windowMs:60000,limit:3,keyGenerator:req=>`issue-master:${req.member.id}`}),async(req,res)=>{
+    const body=z.object({hint:z.string().trim().max(500).optional()}).strict().parse(req.body || {});
+    const item=itemForRequest(req);
+    if(item.kind!=='issue') throw fail(400,'只有 Issue 可以交给 Issue Master 处理');
+    if(item.state!=='open') throw fail(400,'已关闭的 Issue 不能再次触发处理');
+    if(config.demo) return res.json({demo:true,simulated:true});
+    const result=await issueMaster.trigger({repo:config.repo,number:item.number,hint:body.hint || '',requester:`platform:${req.user.login}`,requestId:req.requestId});
+    const taskId=Number(result?.taskId) || null;
+    audit(req,'issue_master.trigger','item',item.id,null,{taskId});
+    res.status(202).json({taskId,status:result?.status || 'queued'});
+  });
+  app.get('/api/items/:id/issue-master',requireAdmin,async(req,res)=>{
+    const item=itemForRequest(req);
+    if(item.kind!=='issue') throw fail(400,'只有 Issue 支持 Issue Master 处理状态');
+    if(config.demo || !issueMaster.configured) return res.json({configured:false,available:false,demo:config.demo});
+    try {
+      const data=await issueMaster.latest({repo:config.repo,number:item.number});
+      res.json({configured:true,available:true,task:data?.task || null,draft:data?.draft || null,feishuNotifyReady:data?.feishuNotifyReady !== false,...(data?.error?{error:data.error}:{})});
+    } catch(error) {
+      if(error.code==='ISSUE_MASTER_DISABLED') return res.json({configured:false,available:false});
+      // Polling must not spam 5xx; surface availability honestly instead.
+      res.json({configured:true,available:false,error:error.status<500?error.message:'Issue Master 服务暂不可达，请稍后重试'});
+    }
+  });
   app.post('/api/sync',requireAdmin,async(req,res)=>{fresh(req,true);const result=await services.sync();audit(req,'integration.sync','repository',config.repo);res.json(result);});
+  // ---- Agent access: member-side token management, tasks and draft review ----
+  if(agentEnabled) {
+    app.get('/api/agent/tokens',(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.query);
+      res.json({tokens:listAgentTokens(db,req.member.id)});
+    });
+    app.post('/api/agent/tokens',rateLimit({windowMs:60000,limit:5,keyGenerator:req=>`agent-token:${req.member.id}`}),(req,res)=>{
+      fresh(req);const body=z.object({name:z.string().trim().min(1).max(60)}).strict().parse(req.body);
+      const created=createAgentToken(db,{memberId:req.member.id,name:body.name});
+      audit(req,'agent.token.create','agent_token',created.id,null,{name:body.name});
+      res.status(201).json({id:created.id,token:created.token,prefix:created.prefix,name:body.name});
+    });
+    app.delete('/api/agent/tokens/:id',(req,res)=>{
+      fresh(req);
+      if(!revokeAgentToken(db,req.member.id,req.params.id)) throw fail(404,'令牌不存在或已撤销');
+      audit(req,'agent.token.revoke','agent_token',req.params.id);
+      res.json({ok:true});
+    });
+    app.post('/api/items/:id/agent-task',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`agent-task:${req.member.id}`}),(req,res)=>{
+      fresh(req);const body=z.object({hint:z.string().trim().max(500).optional()}).strict().parse(req.body||{});
+      const item=itemForRequest(req);
+      if(item.kind!=='issue') throw fail(400,'只有 Issue 可以交给 Agent');
+      if(item.state!=='open') throw fail(400,'已关闭的 Issue 不能创建 Agent 任务');
+      const result=createAgentTask(db,{itemId:item.id,repo:config.repo,number:item.number,memberId:req.member.id,hint:body.hint||''});
+      if(result.created) audit(req,'agent.task.create','item',item.id,null,{taskId:result.task.id});
+      res.status(result.created?201:200).json(result);
+    });
+    app.get('/api/items/:id/agent-task',(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.query);
+      const task=listTasksForMember(db,req.member.id).find(entry=>entry.itemId===req.params.id && ['queued','claimed','submitted'].includes(entry.status)) || null;
+      // Return the latest draft even after publish/decline so the issue page can
+      // keep showing the result (comment link or rejection reason).
+      res.json({task,draft:getLatestDraftForItem(db,req.params.id,req.member.id)});
+    });
+    app.get('/api/agent/drafts',(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.query);
+      res.json({drafts:listDraftsForMember(db,req.member.id)});
+    });
+    app.post('/api/agent/drafts/:id/publish',async(req,res)=>{
+      fresh(req);const body=z.object({actions:z.array(agentActionSchema).max(10).optional()}).strict().parse(req.body||{});
+      const draft=getAgentDraft(db,req.params.id,req.member.id);
+      if(!draft) throw fail(404,'草稿不存在');
+      if(draft.status!=='pending') throw fail(409,'该草稿已处理，不能重复发布');
+      const actions=body.actions ?? draft.actions;
+      if(config.demo) {
+        markPublished(db,draft.id,'');
+        audit(req,'agent.publish','agent_draft',draft.id,null,{demo:true,actions:actions.length});
+        return res.json({demo:true,simulated:true,draft:getAgentDraft(db,draft.id,req.member.id),commentUrl:'',applied:[],errors:[]});
+      }
+      // A reviewed Agent draft is published as the member's own GitHub identity.
+      // The disclosure line is mandatory so readers can tell which Agent wrote it.
+      const agentLabel=(draft.agentName||(draft.agentTokenPrefix?`${draft.agentTokenPrefix}…`:draft.model||'未命名 Agent')).replace(/[\r\n]+/g,' ').slice(0,120);
+      const modelNote=draft.model&&draft.model!==draft.agentName?`（模型：${draft.model}）`:'';
+      const annotation=`\n\n---\n> 本评论由 Agent「${agentLabel}」生成${modelNote}，经 @${req.user.login} 审核后以本人身份发布。`;
+      if(actions.length&&!issueMaster.configured) throw fail(503,'勾选强副作用动作需要 Issue Master 接入','ISSUE_MASTER_DISABLED');
+      let message;
+      try {
+        message=await postPlatformMessage(db,config,{member:req.member,itemId:draft.task.itemId,body:`${draft.commentMd}${annotation}`,bodyLimit:60000,fetchImpl});
+      } catch(error) {
+        markPublishError(db,draft.id,error.message);
+        throw error;
+      }
+      let applied=[],errors=[];
+      if(actions.length) {
+        try {
+          const result=await issueMaster.publish({repo:draft.task.repo,number:draft.task.number,commentMd:'',actions,requester:`agent:${req.user.login}`,idempotencyKey:`${draft.id}:actions`,postComment:false});
+          applied=result?.applied||[];errors=result?.errors||[];
+        } catch(error) { errors=[error.message]; }
+      }
+      const commentUrl=message?.url||'';
+      markPublished(db,draft.id,commentUrl);
+      audit(req,'agent.publish','agent_draft',draft.id,null,{commentUrl,identity:'member',agentName:agentLabel,actions:actions.length,actionErrors:errors.length});
+      res.json({draft:getAgentDraft(db,draft.id,req.member.id),commentUrl,applied,errors});
+    });
+    app.post('/api/agent/drafts/:id/decline',(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.body||{});
+      const draft=getAgentDraft(db,req.params.id,req.member.id);
+      if(!draft) throw fail(404,'草稿不存在');
+      if(draft.status!=='pending') throw fail(409,'该草稿已处理');
+      markDeclined(db,draft.id);
+      audit(req,'agent.draft.decline','agent_draft',draft.id);
+      res.json({draft:getAgentDraft(db,draft.id,req.member.id)});
+    });
+  }
   app.get('/api/assignable-members',(_req,res)=>res.json({members:listMemberViews(db,{appId:config.feishuAppId || '',includeNotes:false}).filter(m=>m.status!=='disabled').map(m=>({id:m.id,githubId:m.githubId,login:m.login,name:m.displayName||m.name,module:m.module,status:m.status,reachable:m.reachable}))}));
   app.get('/api/members',requireAdmin,(_req,res)=>res.json({members:listMemberViews(db,{appId:config.feishuAppId || ''})}));
   app.get('/api/admin/access-policy',requireAdmin,(_req,res)=>{
