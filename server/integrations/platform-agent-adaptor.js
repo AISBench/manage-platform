@@ -38,19 +38,6 @@ export function createAgentAdaptorClient(config, { fetchImpl = fetch } = {}) {
 
   return {
     configured,
-    async trigger({ repo, number, hint = '', requester = '', requestId = '' } = {}) {
-      if (!configured) throw disabled();
-      return call('/api/v1/issue/handle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(requestId ? { 'X-Request-ID': requestId } : {}) },
-        body: JSON.stringify({ repo, number, hint, requester, requestId }),
-      });
-    },
-    async latest({ repo, number } = {}) {
-      if (!configured) throw disabled();
-      const query = new URLSearchParams({ repo: String(repo || ''), number: String(number || '') });
-      return call(`/api/v1/issue/tasks/latest?${query}`);
-    },
     // Read-only knowledge base search backed by deepwiki; never generates text.
     async searchKb({ repo, question, topK } = {}) {
       if (!configured) throw disabled();

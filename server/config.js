@@ -70,7 +70,8 @@ export function loadConfig(env = process.env) {
     tokenEncryptionKey:env.TOKEN_ENCRYPTION_KEY || '',
     conversationPollMinutes:Number(env.CONVERSATION_POLL_MINUTES || 5),
     feishuAppId:env.FEISHU_APP_ID || '',feishuAppSecret:env.FEISHU_APP_SECRET || '',
-    // Optional platform-agent-adaptor integration. Both URL and token are required.
+    // Optional platform-agent-adaptor integration (read-only KB + action-only
+    // publishing for custom Agents). Both URL and token are required.
     agentAdaptorUrl,agentAdaptorToken:env.AGENT_ADAPTOR_TOKEN || '',agentAdaptorTimeoutMs,
     // How MCP clients should start the aisbench server. Defaults to the published
     // npm package; local/source deployments set node + the local cli.js path.

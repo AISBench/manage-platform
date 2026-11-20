@@ -271,7 +271,7 @@
 @media(max-width:1100px){.item-detail-layout{grid-template-columns:minmax(0,1fr) 320px}.item-detail{padding:18px 20px 50px}}
 @media(max-width:860px){.item-detail-layout{grid-template-columns:1fr}.detail-tabs{display:flex;gap:18px;margin-top:14px;border-bottom:1px solid #e6ecef}.detail-tabs button{font-size:10px;color:#9ba8b3;padding:10px 0;position:relative}.detail-tabs button.active{color:#2f8e7c;font-weight:600}.detail-tabs button.active:after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#2f9e85;border-radius:2px}.item-detail-main,.item-detail-side{display:none}.item-detail-main.is-active,.item-detail-side>div.side-active{display:block}.item-detail-title h1{font-size:19px}.item-detail{padding:14px 15px 40px}.message-list{padding:6px 14px 14px}.composer{padding:12px 14px}.conversation-head{padding:14px 15px}}
 
-/* Agent Adaptor 处理卡片 */
+/* Agent 任务 / 草稿状态卡片 */
 .agent-adaptor-note{font-size:9px;color:#8f9da7;line-height:1.7;padding:12px 18px 0}
 .agent-adaptor-status{display:flex;align-items:center;gap:5px;font-size:9px;line-height:1.7;margin:8px 18px 0;padding:7px 9px;border-radius:5px;background:#f7faf9;border:1px solid #e8f0ed;color:#879b96}
 .agent-adaptor-status.is-green{background:#f1faf5;border-color:#dff0e6;color:#4b9a76}

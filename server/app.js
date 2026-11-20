@@ -395,32 +395,6 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.patch('/api/items/:id',(req,res)=>res.json({item:transact(()=>mutateItem(req,req.params.id,itemPatch.parse(req.body)))}));
   app.post('/api/items/:id/claim',(req,res)=>{const body=z.object({version}).strict().parse(req.body);res.json({item:transact(()=>mutateItem(req,req.params.id,body,{claim:true}))});});
   function itemForRequest(req) {const item=allItems().find(i=>i.id===req.params.id);if(!item) throw fail(404,'事务不存在');return item;}
-  // Admin-only bridge to agent_adaptor. Triggering only prepares a draft; publishing
-  // still requires a human confirmation on the Feishu card.
-  app.post('/api/items/:id/agent-adaptor/handle',requireAdmin,rateLimit({windowMs:60000,limit:3,keyGenerator:req=>`agent-adaptor:${req.member.id}`}),async(req,res)=>{
-    const body=z.object({hint:z.string().trim().max(500).optional()}).strict().parse(req.body || {});
-    const item=itemForRequest(req);
-    if(item.kind!=='issue') throw fail(400,'只有 Issue 可以交给 Agent Adaptor 处理');
-    if(item.state!=='open') throw fail(400,'已关闭的 Issue 不能再次触发处理');
-    if(config.demo) return res.json({demo:true,simulated:true});
-    const result=await agentAdaptor.trigger({repo:config.repo,number:item.number,hint:body.hint || '',requester:`platform:${req.user.login}`,requestId:req.requestId});
-    const taskId=Number(result?.taskId) || null;
-    audit(req,'agent_adaptor.trigger','item',item.id,null,{taskId});
-    res.status(202).json({taskId,status:result?.status || 'queued'});
-  });
-  app.get('/api/items/:id/agent-adaptor',requireAdmin,async(req,res)=>{
-    const item=itemForRequest(req);
-    if(item.kind!=='issue') throw fail(400,'只有 Issue 支持 Agent Adaptor 处理状态');
-    if(config.demo || !agentAdaptor.configured) return res.json({configured:false,available:false,demo:config.demo});
-    try {
-      const data=await agentAdaptor.latest({repo:config.repo,number:item.number});
-      res.json({configured:true,available:true,task:data?.task || null,draft:data?.draft || null,feishuNotifyReady:data?.feishuNotifyReady !== false,...(data?.error?{error:data.error}:{})});
-    } catch(error) {
-      if(error.code==='AGENT_ADAPTOR_DISABLED') return res.json({configured:false,available:false});
-      // Polling must not spam 5xx; surface availability honestly instead.
-      res.json({configured:true,available:false,error:error.status<500?error.message:'Agent Adaptor 服务暂不可达，请稍后重试'});
-    }
-  });
   app.post('/api/sync',requireAdmin,async(req,res)=>{fresh(req,true);const result=await services.sync();audit(req,'integration.sync','repository',config.repo);res.json(result);});
   // ---- Agent access: member-side token management, tasks and draft review ----
   if(agentEnabled) {
