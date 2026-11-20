@@ -227,7 +227,7 @@ export function openDatabase(filename) {
       if (!applied.has(11)) {
         // Per-member delivery mode: realtime or a scheduled digest. Event type
         // and detail keep Feishu messages precise without re-parsing subjects.
-        // Version 11 leaves 9/10 to the parallel Issue Master schema work.
+        // Version 11 leaves 9/10 to the parallel Agent Adaptor schema work.
         addColumn(db, 'users', 'notification_mode', "TEXT NOT NULL DEFAULT 'realtime' CHECK(notification_mode IN ('realtime','hourly','daily'))");
         addColumn(db, 'users', 'digest_hour', 'INTEGER NOT NULL DEFAULT 9 CHECK(digest_hour BETWEEN 0 AND 23)');
         addColumn(db, 'notifications', 'event_type', "TEXT NOT NULL DEFAULT 'legacy'");

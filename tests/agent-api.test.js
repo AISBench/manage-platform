@@ -6,7 +6,7 @@ import { saveGitHubToken } from '../server/github-tokens.js';
 
 const TEST_KEY = Buffer.alloc(32, 7).toString('base64');
 
-function fakeIssueMaster(overrides = {}) {
+function fakeAgentAdaptor(overrides = {}) {
   const calls = [];
   return {
     calls,
@@ -21,7 +21,7 @@ function fakeIssueMaster(overrides = {}) {
     },
     async publish(args) {
       calls.push(['publish', args]);
-      if (overrides.publishError) throw Object.assign(new Error(overrides.publishError), { status: 502, code: 'ISSUE_MASTER_UPSTREAM_ERROR' });
+      if (overrides.publishError) throw Object.assign(new Error(overrides.publishError), { status: 502, code: 'AGENT_ADAPTOR_UPSTREAM_ERROR' });
       return { commentUrl: '', applied: ['添加标签：bug'], errors: [], replayed: false };
     },
   };
@@ -37,7 +37,7 @@ async function agentRequest(base, token, route, method = 'GET', body) {
   return { status: response.status, data };
 }
 
-async function setup(t, { item = testItem(), config = {}, issueMaster, githubToken = true } = {}) {
+async function setup(t, { item = testItem(), config = {}, agentAdaptor, githubToken = true } = {}) {
   const comments = [];
   const fetchImpl = async (url, options = {}) => {
     const target = String(url);
@@ -47,7 +47,7 @@ async function setup(t, { item = testItem(), config = {}, issueMaster, githubTok
     }
     throw new Error(`Unexpected external HTTP: ${target}`);
   };
-  const fixture = await httpFixture(t, { integrations: issueMaster ? { issueMaster } : {}, config: { tokenEncryptionKey: TEST_KEY, ...config }, fetchImpl });
+  const fixture = await httpFixture(t, { integrations: agentAdaptor ? { agentAdaptor } : {}, config: { tokenEncryptionKey: TEST_KEY, ...config }, fetchImpl });
   const member = addTestMember(fixture.db, { githubId: '501', login: 'alice' });
   insertItem(fixture.db, item);
   const session = fixture.client(member.id);
@@ -119,7 +119,7 @@ test('task lifecycle: create, list with token, claim idempotently, submit draft,
 });
 
 test('issue page can read the full draft inline and keeps it after publish', async t => {
-  const { session, token, base } = await setup(t, { issueMaster: fakeIssueMaster() });
+  const { session, token, base } = await setup(t, { agentAdaptor: fakeAgentAdaptor() });
   const created = await session.request('/api/items/github:101/agent-task', 'POST', {});
   const taskId = created.data.task.id;
   const draft = { summary: '根因结论', comment_md: '**建议这样修复**', actions: [{ kind: 'add_label', value: 'bug', reason: '复现' }], references: [{ kind: 'file', path: 'tools/config.py', snippet: 'x' }], confidence: 0.6, model: 'test-model' };
@@ -148,13 +148,13 @@ test('invalid drafts are rejected before storage', async t => {
   assert.equal((await submit({ comment_md: 'x', confidence: 2 })).status, 400);
 });
 
-test('kb routes proxy to issue-master and validate input', async t => {
-  const issueMaster = fakeIssueMaster();
-  const { token, base } = await setup(t, { issueMaster });
+test('kb routes proxy to agent-adaptor and validate input', async t => {
+  const agentAdaptor = fakeAgentAdaptor();
+  const { token, base } = await setup(t, { agentAdaptor });
   const search = await agentRequest(base, token, '/api/agent/kb/search', 'POST', { repo: 'AISBench/benchmark', question: '评测 JSON 字段', topK: 5 });
   assert.equal(search.status, 200);
   assert.equal(search.data.chunks[0].path, 'tools/config.py');
-  assert.deepEqual(issueMaster.calls[0], ['searchKb', { repo: 'AISBench/benchmark', question: '评测 JSON 字段', topK: 5 }]);
+  assert.deepEqual(agentAdaptor.calls[0], ['searchKb', { repo: 'AISBench/benchmark', question: '评测 JSON 字段', topK: 5 }]);
   const wiki = await agentRequest(base, token, '/api/agent/kb/wiki?repo=AISBench%2Fbenchmark&topic=eval');
   assert.equal(wiki.status, 200);
   assert.equal(wiki.data.text, '# page');
@@ -162,9 +162,9 @@ test('kb routes proxy to issue-master and validate input', async t => {
   assert.equal((await agentRequest(base, 'ask_invalid', '/api/agent/me')).status, 401);
 });
 
-test('publishing posts as the member, discloses the Agent, and only runs actions through issue_master', async t => {
-  const issueMaster = fakeIssueMaster();
-  const { session, token, db, base, member, client, comments } = await setup(t, { issueMaster });
+test('publishing posts as the member, discloses the Agent, and only runs actions through agent_adaptor', async t => {
+  const agentAdaptor = fakeAgentAdaptor();
+  const { session, token, db, base, member, client, comments } = await setup(t, { agentAdaptor });
   const created = await session.request('/api/items/github:101/agent-task', 'POST', {});
   const draft = { comment_md: '修复建议', model: 'm', actions: [{ kind: 'add_label', value: 'bug', reason: '复现' }] };
   const submitted = await agentRequest(base, token, `/api/agent/tasks/${created.data.task.id}/submit`, 'POST', { draft });
@@ -180,9 +180,9 @@ test('publishing posts as the member, discloses the Agent, and only runs actions
   assert.match(comments[0].body.body, /本评论由 Agent「my agent」生成/);
   assert.match(comments[0].body.body, /@alice/);
   assert.match(comments[0].body.body, /模型：m/);
-  const actionCall = issueMaster.calls.at(-1);
+  const actionCall = agentAdaptor.calls.at(-1);
   assert.equal(actionCall[0], 'publish');
-  assert.equal(actionCall[1].postComment, false, 'issue_master must not post a second comment');
+  assert.equal(actionCall[1].postComment, false, 'agent_adaptor must not post a second comment');
   assert.equal(actionCall[1].commentMd, '');
   assert.deepEqual(actionCall[1].actions.map(action => action.kind), ['add_label']);
   assert.ok(published.data.applied.includes('添加标签：bug'));

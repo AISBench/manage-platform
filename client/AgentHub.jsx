@@ -183,7 +183,7 @@ function Snippet({ title, code, notify }) {
 
 export default function AgentHub({ session, notify }) {
   const enabled = session?.features?.agentAccessEnabled !== false;
-  const configured = session?.issueMasterConfigured !== false;
+  const configured = session?.agentAdaptorConfigured !== false;
   const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get('tab') === 'tasks' ? 'tasks' : 'guide');
   const [tokens, setTokens] = useState([]);
   const [tokensLoading, setTokensLoading] = useState(true);
@@ -283,7 +283,7 @@ export default function AgentHub({ session, notify }) {
           <input value={name} maxLength={60} onChange={event => setName(event.target.value)} placeholder="令牌名称，例如：Claude Code / 本机脚本" aria-label="令牌名称" />
           <button className="btn btn-primary btn-small" type="submit" disabled={creating}>{creating ? <LoaderCircle size={14} className="spin" /> : <Plus size={14} />}{creating ? '生成中…' : '生成令牌'}</button>
         </form>
-        {tokenError && <div className="issue-master-status is-red" role="alert"><CircleAlert size={14} />{tokenError.message}</div>}
+        {tokenError && <div className="agent-adaptor-status is-red" role="alert"><CircleAlert size={14} />{tokenError.message}</div>}
         {newToken && <div className="agent-token-once" role="status">
           <div><strong>请立即复制并妥善保存</strong><p>关闭页面后将无法再次查看该令牌。</p></div>
           <code>{newToken}</code>
@@ -326,7 +326,7 @@ export default function AgentHub({ session, notify }) {
 
     {tab === 'tasks' && <section className="panel agent-panel">
       <div className="panel-title-row"><div><h2><Bot size={18} />我的 Agent 任务</h2><p>Agent 提交草稿后会出现在这里；发布前请核对评论正文、引用与动作。</p></div><button className="btn btn-secondary btn-small" onClick={loadDrafts} disabled={draftsLoading}>刷新</button></div>
-      {draftError ? <div className="issue-master-status is-red" role="alert"><CircleAlert size={14} />{draftError.message}</div> : draftsLoading ? <Spinner label="正在读取草稿…" /> : !drafts.length ? <Empty text="还没有 Agent 草稿。到 Issue 详情页点「交给我的 agent」创建任务。" /> : <div className="agent-draft-list">
+      {draftError ? <div className="agent-adaptor-status is-red" role="alert"><CircleAlert size={14} />{draftError.message}</div> : draftsLoading ? <Spinner label="正在读取草稿…" /> : !drafts.length ? <Empty text="还没有 Agent 草稿。到 Issue 详情页点「交给我的 agent」创建任务。" /> : <div className="agent-draft-list">
         {drafts.map(draft => {
           const [tone, label] = DRAFT_STATUS[draft.status] || ['neutral', draft.status];
           const isOpen = expanded === draft.id;
@@ -335,7 +335,7 @@ export default function AgentHub({ session, notify }) {
               <div><strong>#{draft.task?.number} {draft.task?.item?.title || '（标题缺失）'}</strong><small>{draft.summary || '无摘要'} · {new Date(draft.createdAt).toLocaleString('zh-CN')}{draft.agentName ? ` · Agent「${draft.agentName}」` : ''}{draft.model ? ` · ${draft.model}` : ''}</small></div>
               <Badge tone={tone}>{label}</Badge>
             </button>
-            {draft.publishError && <p className="issue-master-status is-red"><CircleAlert size={13} />{draft.publishError}</p>}
+            {draft.publishError && <p className="agent-adaptor-status is-red"><CircleAlert size={13} />{draft.publishError}</p>}
             {isOpen && <div className="agent-draft-body">
               <h4>评论正文</h4>
               <Markdown text={draft.commentMd} empty="（空）" />

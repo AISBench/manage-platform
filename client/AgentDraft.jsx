@@ -44,8 +44,8 @@ export default function AgentDraft({ draft, notify, onChanged }) {
       <div><strong>{draft.summary || '无摘要'}</strong><small>{new Date(draft.createdAt).toLocaleString('zh-CN')}{draft.agentName ? ` · Agent「${draft.agentName}」` : ''}{draft.model ? ` · ${draft.model}` : ''}</small></div>
       <Badge tone={tone}>{label}</Badge>
     </div>
-    {error && <p className="issue-master-status is-red" role="alert"><CircleAlert size={14} />{error.message}{error.status === 409 && /GitHub/.test(error.message) && <a className="text-button" href={`/auth/github?${new URLSearchParams({ returnTo: window.location.pathname })}`}>去授权 GitHub 写入</a>}</p>}
-    {draft.publishError && <p className="issue-master-status is-red"><CircleAlert size={13} />{draft.publishError}</p>}
+    {error && <p className="agent-adaptor-status is-red" role="alert"><CircleAlert size={14} />{error.message}{error.status === 409 && /GitHub/.test(error.message) && <a className="text-button" href={`/auth/github?${new URLSearchParams({ returnTo: window.location.pathname })}`}>去授权 GitHub 写入</a>}</p>}
+    {draft.publishError && <p className="agent-adaptor-status is-red"><CircleAlert size={13} />{draft.publishError}</p>}
     <h4>评论正文</h4>
     <Markdown text={draft.commentMd} empty="（空）" />
     {draft.rootCauseHypothesis && <><h4>根因假设</h4><p>{draft.rootCauseHypothesis}</p></>}

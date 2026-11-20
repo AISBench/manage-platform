@@ -271,18 +271,18 @@
 @media(max-width:1100px){.item-detail-layout{grid-template-columns:minmax(0,1fr) 320px}.item-detail{padding:18px 20px 50px}}
 @media(max-width:860px){.item-detail-layout{grid-template-columns:1fr}.detail-tabs{display:flex;gap:18px;margin-top:14px;border-bottom:1px solid #e6ecef}.detail-tabs button{font-size:10px;color:#9ba8b3;padding:10px 0;position:relative}.detail-tabs button.active{color:#2f8e7c;font-weight:600}.detail-tabs button.active:after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#2f9e85;border-radius:2px}.item-detail-main,.item-detail-side{display:none}.item-detail-main.is-active,.item-detail-side>div.side-active{display:block}.item-detail-title h1{font-size:19px}.item-detail{padding:14px 15px 40px}.message-list{padding:6px 14px 14px}.composer{padding:12px 14px}.conversation-head{padding:14px 15px}}
 
-/* Issue Master 处理卡片 */
-.issue-master-note{font-size:9px;color:#8f9da7;line-height:1.7;padding:12px 18px 0}
-.issue-master-status{display:flex;align-items:center;gap:5px;font-size:9px;line-height:1.7;margin:8px 18px 0;padding:7px 9px;border-radius:5px;background:#f7faf9;border:1px solid #e8f0ed;color:#879b96}
-.issue-master-status.is-green{background:#f1faf5;border-color:#dff0e6;color:#4b9a76}
-.issue-master-status.is-amber{background:#fffaf0;border-color:#f4e7cd;color:#b58f45}
-.issue-master-status.is-red{background:#fff8f6;border-color:#f2ded9;color:#bd8578}
-.issue-master-status.is-neutral{background:#f7f9fa;border-color:#e9eef1;color:#8f9da7}
-.issue-master-meta{font-size:8.5px;color:#aab6bf;padding:8px 18px 0}
-.issue-master-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px 16px}
-.issue-master-hint{display:block;width:calc(100% - 36px);margin:0 18px 16px;padding:8px 10px;border:1px solid #e4eaed;border-radius:6px;font-size:9px;line-height:1.6;color:#5f7280;resize:vertical;font-family:inherit}
-.issue-master-hint:focus{outline:none;border-color:#9fcbbd;box-shadow:0 0 0 3px #2f9e8514}
-.detail-card .issue-master-meta~.external-text-link{margin:8px 18px 0;display:inline-block}
+/* Agent Adaptor 处理卡片 */
+.agent-adaptor-note{font-size:9px;color:#8f9da7;line-height:1.7;padding:12px 18px 0}
+.agent-adaptor-status{display:flex;align-items:center;gap:5px;font-size:9px;line-height:1.7;margin:8px 18px 0;padding:7px 9px;border-radius:5px;background:#f7faf9;border:1px solid #e8f0ed;color:#879b96}
+.agent-adaptor-status.is-green{background:#f1faf5;border-color:#dff0e6;color:#4b9a76}
+.agent-adaptor-status.is-amber{background:#fffaf0;border-color:#f4e7cd;color:#b58f45}
+.agent-adaptor-status.is-red{background:#fff8f6;border-color:#f2ded9;color:#bd8578}
+.agent-adaptor-status.is-neutral{background:#f7f9fa;border-color:#e9eef1;color:#8f9da7}
+.agent-adaptor-meta{font-size:8.5px;color:#aab6bf;padding:8px 18px 0}
+.agent-adaptor-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px 16px}
+.agent-adaptor-hint{display:block;width:calc(100% - 36px);margin:0 18px 16px;padding:8px 10px;border:1px solid #e4eaed;border-radius:6px;font-size:9px;line-height:1.6;color:#5f7280;resize:vertical;font-family:inherit}
+.agent-adaptor-hint:focus{outline:none;border-color:#9fcbbd;box-shadow:0 0 0 3px #2f9e8514}
+.detail-card .agent-adaptor-meta~.external-text-link{margin:8px 18px 0;display:inline-block}
 
 
 
@@ -333,7 +333,7 @@
 .agent-draft-summary strong{display:block;font-size:12px;color:#252d27}
 .agent-draft-summary small{display:block;margin-top:4px;font-size:10px;color:#8a918a}
 .agent-task-draft{margin-top:4px}
-.agent-task-card .issue-master-note{font-size:11px}
+.agent-task-card .agent-adaptor-note{font-size:11px}
 .agent-client-groups{display:flex;flex-direction:column;gap:9px;margin:0 0 12px}
 .agent-client-group{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .agent-client-group>span{min-width:70px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9aa09a}

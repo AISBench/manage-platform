@@ -5,7 +5,7 @@ import { Badge, ErrorBox, Spinner } from './ui.jsx';
 import Conversation from './Conversation.jsx';
 import ItemDescription from './ItemDescription.jsx';
 import { CIColumn, InfoColumn, OperationsColumn } from './ItemEvents.jsx';
-import IssueMaster from './IssueMaster.jsx';
+import AgentAdaptor from './AgentAdaptor.jsx';
 import AgentTask from './AgentTask.jsx';
 
 const TABS = [['conversation', '对话'], ['ci', 'CI'], ['operations', '操作记录'], ['info', '信息']];
@@ -111,7 +111,7 @@ export default function ItemDetail({ itemId, user, session, notify, onBack }) {
     <div className="item-detail-layout">
       <div className={`item-detail-main ${tab === 'conversation' ? 'is-active' : ''}`}><ItemDescription item={item} /><Conversation itemId={itemId} data={data} user={user} session={session} notify={notify} reload={load} loading={loading} error={error} older={older} onLoadOlder={loadOlder} /></div>
       <aside className="item-detail-side"><div className="side-inner">
-        {user?.isAdmin && item.kind === 'issue' && <IssueMaster item={item} notify={notify} />}
+        {user?.isAdmin && item.kind === 'issue' && <AgentAdaptor item={item} notify={notify} />}
         <AgentTask item={item} user={user} notify={notify} />
         <div className={tab === 'info' ? 'side-active' : ''}><InfoColumn item={item} user={user} notify={notify} onSaved={() => load({ refresh: false })} /></div>
         <div className={tab === 'ci' ? 'side-active' : ''}><CIColumn events={sideEvents.ci} itemId={itemId} user={user} session={session} notify={notify} onChanged={() => load({ refresh: false })} onCiTriggered={trackCi} /></div>

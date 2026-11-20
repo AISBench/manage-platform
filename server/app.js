@@ -17,7 +17,7 @@ import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
 import { saveGitHubToken, deleteGitHubToken } from './github-tokens.js';
 import { listConversation, syncItemConversation, postPlatformMessage, retryPlatformMessage, resolveItemReviewThread, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto } from './conversation.js';
 import { listLabels, labelWriteAccess, updateItemLabels, hasLabel } from './labels.js';
-import { createIssueMasterClient } from './integrations/issue-master.js';
+import { createAgentAdaptorClient } from './integrations/platform-agent-adaptor.js';
 import { buildItemContext } from './agent-context.js';
 import { agentDraftSchema, agentActionSchema, formatDraftError } from './agent-draft.js';
 import { createAgentToken, listAgentTokens, revokeAgentToken, resolveAgentToken } from './agent-tokens.js';
@@ -41,7 +41,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   if(config.demo) seedDemo(db,config.repo);
   db.exec("UPDATE notifications SET status='pending' WHERE status='sending'");
   const services=createServices(db,config,{...integrations,fetchImpl});
-  const issueMaster=integrations.issueMaster || createIssueMasterClient(config,{fetchImpl});
+  const agentAdaptor=integrations.agentAdaptor || createAgentAdaptorClient(config,{fetchImpl});
   const app=express();app.disable('x-powered-by');app.set('trust proxy',config.trustProxy || false);
   const allItems=()=>listItems(db,Date.now(),config.feishuAppId || '');
   function withUnread(items,memberId) {
@@ -149,7 +149,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.use('/auth',rateLimit({windowMs:60000,limit:40}));
   app.get('/api/session',(req,res)=>{
     const policy=getAccessPolicy(db);
-    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuOAuthConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuWebhookConfigured:!!config.tokenEncryptionKey&&!config.demo,issueMasterConfigured:Boolean(config.issueMasterUrl&&config.issueMasterToken),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true,agentAccessEnabled:config.agentEnabled,agentMcp:{command:config.agentMcpCommand,args:config.agentMcpArgs}}});
+    res.json({mode:req.user?'member':'guest',user:req.user || null,csrfToken:req.session?.csrf || null,demo:config.demo,githubConfigured:!!config.githubClientId,githubWriteConfigured:!!config.tokenEncryptionKey,githubOAuthScopes:config.githubOAuthScope,feishuConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuOAuthConfigured:!!(config.feishuAppId&&config.feishuAppSecret),feishuWebhookConfigured:!!config.tokenEncryptionKey&&!config.demo,agentAdaptorConfigured:Boolean(config.agentAdaptorUrl&&config.agentAdaptorToken),repo:config.repo,features:{publicOverviewEnabled:policy.publicOverviewEnabled,conversationEnabled:true,agentAccessEnabled:config.agentEnabled,agentMcp:{command:config.agentMcpCommand,args:config.agentMcpArgs}}});
   });
   app.use('/api/public',rateLimit({windowMs:60000,limit:120}));
   // ---- Agent access: personal token routes (Bearer, no browser session) ----
@@ -201,12 +201,12 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     app.post('/api/agent/kb/search',requireAgentToken,agentLimiter,async(req,res)=>{
       const body=z.object({repo:z.string().trim().max(200).min(1),question:z.string().trim().min(1).max(2000),topK:z.number().int().min(1).max(12).optional()}).strict().parse(req.body||{});
       if(config.demo) throw fail(503,'演示模式不连接知识库（AGENT_DEMO）');
-      res.json(await issueMaster.searchKb({repo:body.repo,question:body.question,topK:body.topK}));
+      res.json(await agentAdaptor.searchKb({repo:body.repo,question:body.question,topK:body.topK}));
     });
     app.get('/api/agent/kb/wiki',requireAgentToken,agentLimiter,async(req,res)=>{
       const query=z.object({repo:z.string().trim().max(200).min(1),topic:z.string().trim().min(1).max(200)}).strict().parse(req.query);
       if(config.demo) throw fail(503,'演示模式不连接知识库（AGENT_DEMO）');
-      res.json(await issueMaster.wiki({repo:query.repo,topic:query.topic}));
+      res.json(await agentAdaptor.wiki({repo:query.repo,topic:query.topic}));
     });
     app.post('/api/agent/tasks/:id/submit',requireAgentToken,agentLimiter,(req,res)=>{
       const payload=req.body?.draft ?? req.body;
@@ -395,30 +395,30 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   app.patch('/api/items/:id',(req,res)=>res.json({item:transact(()=>mutateItem(req,req.params.id,itemPatch.parse(req.body)))}));
   app.post('/api/items/:id/claim',(req,res)=>{const body=z.object({version}).strict().parse(req.body);res.json({item:transact(()=>mutateItem(req,req.params.id,body,{claim:true}))});});
   function itemForRequest(req) {const item=allItems().find(i=>i.id===req.params.id);if(!item) throw fail(404,'事务不存在');return item;}
-  // Admin-only bridge to issue_master. Triggering only prepares a draft; publishing
+  // Admin-only bridge to agent_adaptor. Triggering only prepares a draft; publishing
   // still requires a human confirmation on the Feishu card.
-  app.post('/api/items/:id/issue-master/handle',requireAdmin,rateLimit({windowMs:60000,limit:3,keyGenerator:req=>`issue-master:${req.member.id}`}),async(req,res)=>{
+  app.post('/api/items/:id/agent-adaptor/handle',requireAdmin,rateLimit({windowMs:60000,limit:3,keyGenerator:req=>`agent-adaptor:${req.member.id}`}),async(req,res)=>{
     const body=z.object({hint:z.string().trim().max(500).optional()}).strict().parse(req.body || {});
     const item=itemForRequest(req);
-    if(item.kind!=='issue') throw fail(400,'只有 Issue 可以交给 Issue Master 处理');
+    if(item.kind!=='issue') throw fail(400,'只有 Issue 可以交给 Agent Adaptor 处理');
     if(item.state!=='open') throw fail(400,'已关闭的 Issue 不能再次触发处理');
     if(config.demo) return res.json({demo:true,simulated:true});
-    const result=await issueMaster.trigger({repo:config.repo,number:item.number,hint:body.hint || '',requester:`platform:${req.user.login}`,requestId:req.requestId});
+    const result=await agentAdaptor.trigger({repo:config.repo,number:item.number,hint:body.hint || '',requester:`platform:${req.user.login}`,requestId:req.requestId});
     const taskId=Number(result?.taskId) || null;
-    audit(req,'issue_master.trigger','item',item.id,null,{taskId});
+    audit(req,'agent_adaptor.trigger','item',item.id,null,{taskId});
     res.status(202).json({taskId,status:result?.status || 'queued'});
   });
-  app.get('/api/items/:id/issue-master',requireAdmin,async(req,res)=>{
+  app.get('/api/items/:id/agent-adaptor',requireAdmin,async(req,res)=>{
     const item=itemForRequest(req);
-    if(item.kind!=='issue') throw fail(400,'只有 Issue 支持 Issue Master 处理状态');
-    if(config.demo || !issueMaster.configured) return res.json({configured:false,available:false,demo:config.demo});
+    if(item.kind!=='issue') throw fail(400,'只有 Issue 支持 Agent Adaptor 处理状态');
+    if(config.demo || !agentAdaptor.configured) return res.json({configured:false,available:false,demo:config.demo});
     try {
-      const data=await issueMaster.latest({repo:config.repo,number:item.number});
+      const data=await agentAdaptor.latest({repo:config.repo,number:item.number});
       res.json({configured:true,available:true,task:data?.task || null,draft:data?.draft || null,feishuNotifyReady:data?.feishuNotifyReady !== false,...(data?.error?{error:data.error}:{})});
     } catch(error) {
-      if(error.code==='ISSUE_MASTER_DISABLED') return res.json({configured:false,available:false});
+      if(error.code==='AGENT_ADAPTOR_DISABLED') return res.json({configured:false,available:false});
       // Polling must not spam 5xx; surface availability honestly instead.
-      res.json({configured:true,available:false,error:error.status<500?error.message:'Issue Master 服务暂不可达，请稍后重试'});
+      res.json({configured:true,available:false,error:error.status<500?error.message:'Agent Adaptor 服务暂不可达，请稍后重试'});
     }
   });
   app.post('/api/sync',requireAdmin,async(req,res)=>{fresh(req,true);const result=await services.sync();audit(req,'integration.sync','repository',config.repo);res.json(result);});
@@ -476,7 +476,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       const agentLabel=(draft.agentName||(draft.agentTokenPrefix?`${draft.agentTokenPrefix}…`:draft.model||'未命名 Agent')).replace(/[\r\n]+/g,' ').slice(0,120);
       const modelNote=draft.model&&draft.model!==draft.agentName?`（模型：${draft.model}）`:'';
       const annotation=`\n\n---\n> 本评论由 Agent「${agentLabel}」生成${modelNote}，经 @${req.user.login} 审核后以本人身份发布。`;
-      if(actions.length&&!issueMaster.configured) throw fail(503,'勾选强副作用动作需要 Issue Master 接入','ISSUE_MASTER_DISABLED');
+      if(actions.length&&!agentAdaptor.configured) throw fail(503,'勾选强副作用动作需要 Agent Adaptor 接入','AGENT_ADAPTOR_DISABLED');
       let message;
       try {
         message=await postPlatformMessage(db,config,{member:req.member,itemId:draft.task.itemId,body:`${draft.commentMd}${annotation}`,bodyLimit:60000,fetchImpl});
@@ -487,7 +487,7 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       let applied=[],errors=[];
       if(actions.length) {
         try {
-          const result=await issueMaster.publish({repo:draft.task.repo,number:draft.task.number,commentMd:'',actions,requester:`agent:${req.user.login}`,idempotencyKey:`${draft.id}:actions`,postComment:false});
+          const result=await agentAdaptor.publish({repo:draft.task.repo,number:draft.task.number,commentMd:'',actions,requester:`agent:${req.user.login}`,idempotencyKey:`${draft.id}:actions`,postComment:false});
           applied=result?.applied||[];errors=result?.errors||[];
         } catch(error) { errors=[error.message]; }
       }

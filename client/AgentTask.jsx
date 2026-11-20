@@ -55,21 +55,21 @@ export default function AgentTask({ item, notify }) {
 
   return <section className="detail-card agent-task-card">
     <div className="detail-card-title"><h3><Bot size={16} />交给我的 Agent</h3>{loading && !task && !draft ? <Badge tone="neutral">读取中…</Badge> : view ? <Badge tone={view[0]}>{view[1]}</Badge> : <Badge tone="neutral">未创建</Badge>}</div>
-    <p className="issue-master-note">任务只包含 GitHub 公开事实与知识库检索结果；Agent 生成的草稿仍需你在平台人工确认后才会发布。</p>
-    {error && <p className="issue-master-status is-red" role="alert"><CircleAlert size={14} />{error.message}</p>}
-    {task && <p className="issue-master-meta">任务 #{task.id}{task.createdAt ? ` · ${new Date(task.createdAt).toLocaleString('zh-CN')}` : ''}{view?.[2] ? ` · ${view[2]}` : ''}</p>}
+    <p className="agent-adaptor-note">任务只包含 GitHub 公开事实与知识库检索结果；Agent 生成的草稿仍需你在平台人工确认后才会发布。</p>
+    {error && <p className="agent-adaptor-status is-red" role="alert"><CircleAlert size={14} />{error.message}</p>}
+    {task && <p className="agent-adaptor-meta">任务 #{task.id}{task.createdAt ? ` · ${new Date(task.createdAt).toLocaleString('zh-CN')}` : ''}{view?.[2] ? ` · ${view[2]}` : ''}</p>}
     {draft && <div className="agent-task-draft">
-      <p className="issue-master-meta">草稿 · {draft.summary || '无摘要'}{draft.updatedAt ? ` · ${new Date(draft.updatedAt).toLocaleString('zh-CN')}` : ''}</p>
-      <div className="issue-master-actions">
+      <p className="agent-adaptor-meta">草稿 · {draft.summary || '无摘要'}{draft.updatedAt ? ` · ${new Date(draft.updatedAt).toLocaleString('zh-CN')}` : ''}</p>
+      <div className="agent-adaptor-actions">
         <button type="button" className="btn btn-secondary btn-small" onClick={() => setModal(true)}>查看并处理草稿</button>
         {draft.status === 'pending' && <Badge tone="amber">待审阅</Badge>}
       </div>
     </div>}
-    {!loading && !task && <div className="issue-master-actions">
+    {!loading && !task && <div className="agent-adaptor-actions">
       <button type="button" className="btn btn-secondary btn-small" disabled={submitting} onClick={create}>{submitting ? <LoaderCircle size={13} className="spin" /> : <Sparkles size={13} />}交给我的 agent</button>
       <button type="button" className="text-button" onClick={() => setShowHint(value => !value)}>{showHint ? '收起补充提示' : '补充提示（可选）'}</button>
     </div>}
-    {showHint && !task && <textarea className="issue-master-hint" rows={3} maxLength={500} value={hint} onChange={event => setHint(event.target.value)} placeholder="可选：告诉 Agent 重点关注什么（最多 500 字）" />}
+    {showHint && !task && <textarea className="agent-adaptor-hint" rows={3} maxLength={500} value={hint} onChange={event => setHint(event.target.value)} placeholder="可选：告诉 Agent 重点关注什么（最多 500 字）" />}
     {!draft && <a className="external-text-link" href="/workspace?view=agent&tab=tasks">查看我的 Agent 任务<ArrowUpRight size={13} /></a>}
     {modal && draft && <Modal title={`Agent 草稿 · #${item.number}`} onClose={() => setModal(false)} wide>
       <AgentDraft draft={draft} notify={notify} onChanged={load} />

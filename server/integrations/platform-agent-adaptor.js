@@ -6,29 +6,29 @@ function fail(status, code, message) {
 }
 
 function disabled() {
-  return fail(503, 'ISSUE_MASTER_DISABLED', '未配置 Issue Master 接入（ISSUE_MASTER_URL / ISSUE_MASTER_TOKEN）');
+  return fail(503, 'AGENT_ADAPTOR_DISABLED', '未配置 Agent Adaptor 接入（AGENT_ADAPTOR_URL / AGENT_ADAPTOR_TOKEN）');
 }
 
 function mapError(error) {
   const status = error?.status;
-  if (status === 401 || status === 403) return fail(502, 'ISSUE_MASTER_AUTH_FAILED', 'Issue Master 接入令牌无效或已过期');
-  if (status === 422) return fail(400, 'ISSUE_MASTER_REPO_UNSUPPORTED', 'Issue Master 未托管该仓库');
-  if (status === 429) return fail(429, 'ISSUE_MASTER_RATE_LIMITED', 'Issue Master 请求过于频繁，请稍后重试');
-  if (status === 400) return fail(400, 'ISSUE_MASTER_INVALID_REQUEST', 'Issue Master 拒绝了该请求，请检查 issue 编号与提示内容');
-  if (status >= 500) return fail(502, 'ISSUE_MASTER_UPSTREAM_ERROR', 'Issue Master 服务返回错误，请查看其日志');
-  return fail(503, 'ISSUE_MASTER_UNAVAILABLE', '无法连接 Issue Master 服务，请检查网络与地址配置');
+  if (status === 401 || status === 403) return fail(502, 'AGENT_ADAPTOR_AUTH_FAILED', 'Agent Adaptor 接入令牌无效或已过期');
+  if (status === 422) return fail(400, 'AGENT_ADAPTOR_REPO_UNSUPPORTED', 'Agent Adaptor 未托管该仓库');
+  if (status === 429) return fail(429, 'AGENT_ADAPTOR_RATE_LIMITED', 'Agent Adaptor 请求过于频繁，请稍后重试');
+  if (status === 400) return fail(400, 'AGENT_ADAPTOR_INVALID_REQUEST', 'Agent Adaptor 拒绝了该请求，请检查 issue 编号与提示内容');
+  if (status >= 500) return fail(502, 'AGENT_ADAPTOR_UPSTREAM_ERROR', 'Agent Adaptor 服务返回错误，请查看其日志');
+  return fail(503, 'AGENT_ADAPTOR_UNAVAILABLE', '无法连接 Agent Adaptor 服务，请检查网络与地址配置');
 }
 
-export function createIssueMasterClient(config, { fetchImpl = fetch } = {}) {
-  const base = (config.issueMasterUrl || '').replace(/\/+$/, '');
-  const token = config.issueMasterToken || '';
+export function createAgentAdaptorClient(config, { fetchImpl = fetch } = {}) {
+  const base = (config.agentAdaptorUrl || '').replace(/\/+$/, '');
+  const token = config.agentAdaptorToken || '';
   const configured = Boolean(base && token);
-  const timeoutMs = config.issueMasterTimeoutMs || 15000;
+  const timeoutMs = config.agentAdaptorTimeoutMs || 15000;
 
   async function call(path, options = {}) {
     try {
       const { data } = await requestJson(`${base}${path}`, {
-        fetchImpl, timeoutMs, label: 'Issue Master',
+        fetchImpl, timeoutMs, label: 'Agent Adaptor',
         ...options,
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(options.headers || {}) },
       });

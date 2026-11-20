@@ -42,13 +42,13 @@ export function loadConfig(env = process.env) {
   const base=new URL(env.BASE_URL || `http://127.0.0.1:${port}`);
   if (!['http:','https:'].includes(base.protocol) || base.username || base.password || base.pathname!=='/' || base.search || base.hash) throw new Error('BASE_URL must be an HTTP(S) origin without credentials or path');
   const list=value=>(value || '').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
-  const issueMasterUrl=(env.AGENT_ADAPTOR_URL || env.ISSUE_MASTER_URL || '').trim().replace(/\/+$/,'');
-  const issueMasterTimeoutMs=Number(env.AGENT_ADAPTOR_TIMEOUT_MS || env.ISSUE_MASTER_TIMEOUT_MS || 15000);
-  if (issueMasterUrl) {
-    let parsed;try {parsed=new URL(issueMasterUrl);} catch {throw new Error('AGENT_ADAPTOR_URL must be a valid HTTP(S) URL');}
+  const agentAdaptorUrl=(env.AGENT_ADAPTOR_URL || '').trim().replace(/\/+$/,'');
+  const agentAdaptorTimeoutMs=Number(env.AGENT_ADAPTOR_TIMEOUT_MS || 15000);
+  if (agentAdaptorUrl) {
+    let parsed;try {parsed=new URL(agentAdaptorUrl);} catch {throw new Error('AGENT_ADAPTOR_URL must be a valid HTTP(S) URL');}
     if (!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.search||parsed.hash) throw new Error('AGENT_ADAPTOR_URL must not contain credentials, query or hash');
   }
-  if (!Number.isInteger(issueMasterTimeoutMs)||issueMasterTimeoutMs<1000||issueMasterTimeoutMs>120000) throw new Error('AGENT_ADAPTOR_TIMEOUT_MS must be an integer from 1000 to 120000');
+  if (!Number.isInteger(agentAdaptorTimeoutMs)||agentAdaptorTimeoutMs<1000||agentAdaptorTimeoutMs>120000) throw new Error('AGENT_ADAPTOR_TIMEOUT_MS must be an integer from 1000 to 120000');
   const agentMcpCommand=(env.AGENT_MCP_COMMAND || 'npx').trim();
   if (!agentMcpCommand) throw new Error('AGENT_MCP_COMMAND must not be empty');
   let agentMcpArgs=['-y','aisbench-mcp'];
@@ -71,7 +71,7 @@ export function loadConfig(env = process.env) {
     conversationPollMinutes:Number(env.CONVERSATION_POLL_MINUTES || 5),
     feishuAppId:env.FEISHU_APP_ID || '',feishuAppSecret:env.FEISHU_APP_SECRET || '',
     // Optional platform-agent-adaptor integration. Both URL and token are required.
-    issueMasterUrl,issueMasterToken:env.AGENT_ADAPTOR_TOKEN || env.ISSUE_MASTER_TOKEN || '',issueMasterTimeoutMs,
+    agentAdaptorUrl,agentAdaptorToken:env.AGENT_ADAPTOR_TOKEN || '',agentAdaptorTimeoutMs,
     // How MCP clients should start the aisbench server. Defaults to the published
     // npm package; local/source deployments set node + the local cli.js path.
     agentMcpCommand,agentMcpArgs,

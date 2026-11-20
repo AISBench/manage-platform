@@ -66,8 +66,8 @@ Public reason: disabled / unverified / private / expired / no_snapshot / ready. 
 | PUT /api/items/:id/labels | `{labels:[≤20 names]}` → `{item,labels}`; writes through to GitHub as the member and needs triage or above; 403 `GITHUB_WRITE_UNAUTHORIZED` / `GITHUB_LABEL_FORBIDDEN`, 422 `LABEL_UNKNOWN`; demo mode only edits local data |
 | PATCH /api/items/:id | `{version,workflow?,ownerMemberId?,priority?,dueAt?}` → `{item}`; related members edit local fields; owner changes require admin |
 | POST /api/items/:id/claim | `{version}` → `{item}`; active member, open/unassigned item, atomic no-steal |
-| POST /api/items/:id/issue-master/handle | Admin+CSRF `{hint?≤500}` → 202 `{taskId,status}`; open issues only; calls platform-agent-adaptor; demo `{demo:true,simulated:true}`; 503 `ISSUE_MASTER_DISABLED` / `ISSUE_MASTER_UNAVAILABLE` |
-| GET /api/items/:id/issue-master | Admin `{configured,available,task,draft,feishuNotifyReady,error?}`; adaptor status; unavailable upstream returns 200 with `available:false` |
+| POST /api/items/:id/agent-adaptor/handle | Admin+CSRF `{hint?≤500}` → 202 `{taskId,status}`; open issues only; calls platform-agent-adaptor; demo `{demo:true,simulated:true}`; 503 `AGENT_ADAPTOR_DISABLED` / `AGENT_ADAPTOR_UNAVAILABLE` |
+| GET /api/items/:id/agent-adaptor | Admin `{configured,available,task,draft,feishuNotifyReady,error?}`; adaptor status; unavailable upstream returns 200 with `available:false` |
 | POST /api/items/bulk-assign | Admin: `{items:[{id,version}],ownerMemberId}` → `{items}`; 1–100 unique items, all-or-nothing |
 | GET /api/assignable-members | `{members:[{id,githubId,login,name,module,status,reachable}]}`; excludes disabled, includes pending, no notes |
 
