@@ -57,6 +57,63 @@ function continueYaml(origin, token, mcp) {
   const { command, args } = mcpOf(mcp);
   return `mcpServers:\n  - name: aisbench\n    command: ${command}\n    args:\n${args.map(arg => `      - ${arg}`).join('\n')}\n    env:\n      AISBENCH_URL: ${origin}\n      AISBENCH_TOKEN: ${token}`;
 }
+function piCli(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return `pi mcp add aisbench \\\n  --env AISBENCH_URL=${origin} \\\n  --env AISBENCH_TOKEN=${token} \\\n  -- ${command} ${args.join(' ')}\n\npi mcp list`;
+}
+function opencodeJson(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { aisbench: { type: 'local', command: [command, ...args], environment: envOf(origin, token) } } } }, null, 2);
+}
+function ampJson(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return JSON.stringify({ 'amp.mcpServers': { aisbench: { command, args, env: envOf(origin, token) } } }, null, 2);
+}
+function crushJson(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return JSON.stringify({ $schema: 'https://charm.land/crush.json', mcp: { aisbench: { type: 'stdio', command, args, env: envOf(origin, token) } } }, null, 2);
+}
+function gooseYaml(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return `extensions:\n  aisbench:\n    name: AISBench\n    type: stdio\n    cmd: ${command}\n    args: ${JSON.stringify(args)}\n    enabled: true\n    timeout: 300\n    envs:\n      AISBENCH_URL: ${origin}\n      AISBENCH_TOKEN: ${token}`;
+}
+function copilotJson(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return JSON.stringify({ mcpServers: { aisbench: { type: 'local', command, args, env: envOf(origin, token), tools: ['*'] } } }, null, 2);
+}
+function openclawCli(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  const argFlags = args.map(arg => `--arg ${arg}`).join(' ');
+  return `# add / probe 需要独占配置，先停止 OpenClaw Gateway
+openclaw mcp add aisbench --command ${command} ${argFlags} \\\n  --env AISBENCH_URL=${origin} --env AISBENCH_TOKEN=${token}\n\nopenclaw mcp probe aisbench`;
+}
+function dshSteps(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return `# 1) DeepSeek Harness 的 MCP 由插件提供，先安装 MCP 客户端插件（已内置则跳过）
+dsh plugin --profile web add @deepseek-ai/dsh-mcp-client
+
+# 2) 打开 dsh Web UI → Settings → Plugins → MCP，新增 stdio server：
+#    command: ${command}
+#    args:    ${JSON.stringify(args)}
+#    env:     AISBENCH_URL=${origin}
+#             AISBENCH_TOKEN=${token}
+
+# 3) 重启该 profile，在 dsh 的 MCP / 工具列表确认 aisbench 的 6 个工具`;
+}
+function dshDesktopSteps(origin, token, mcp) {
+  const { command, args } = mcpOf(mcp);
+  return `# 1) 打开 DeepSeek Harness 桌面版 → Plugins，搜索并安装 MCP 客户端插件
+#    （如 dsh-plugin-setting-mcp；官方桌面版已内置则跳过）
+#    第三方封装（如 DSH Desktop by Dataelem）复用 ~/.dsh，插件在终端里装好即可
+
+# 2) 打开 Settings → Plugins → MCP，新增 stdio server：
+#    command: ${command}
+#    args:    ${JSON.stringify(args)}
+#    env:     AISBENCH_URL=${origin}
+#             AISBENCH_TOKEN=${token}
+
+# 3) 在桌面版的 MCP / 工具列表确认 aisbench 的 6 个工具`;
+}
 function httpCurl(origin, token) {
   return `curl -s ${origin}/api/agent/me -H "Authorization: Bearer ${token}"\ncurl -s ${origin}/api/agent/tasks -H "Authorization: Bearer ${token}"\ncurl -s -X POST ${origin}/api/agent/kb/search \\\n  -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \\\n  -d '{"repo":"AISBench/benchmark","question":"评测结果 JSON 有哪些字段"}'`;
 }
@@ -65,6 +122,15 @@ const CLIENTS = [
   { id: 'claude-code', label: 'Claude Code', group: '命令行', kind: 'cli', file: '在项目目录执行下面的命令', verify: '在 Claude Code 中执行 /mcp，能看到 aisbench 及 6 个工具。' },
   { id: 'codex', label: 'Codex CLI', group: '命令行', kind: 'toml', file: '~/.codex/config.toml', verify: '重启 codex 后执行 /mcp，能看到 aisbench。' },
   { id: 'gemini', label: 'Gemini CLI', group: '命令行', kind: 'json', file: '~/.gemini/settings.json', verify: '重启后执行 /mcp，能看到 aisbench 的工具列表。' },
+  { id: 'pi', label: 'Pi', group: '命令行', kind: 'pi', file: '~/.pi/agent/mcp.json（用 pi mcp add 写入，加 -l 写入项目 .pi/mcp.json）', verify: '执行 pi mcp list，看到 aisbench 已连接并列出 6 个工具。' },
+  { id: 'opencode', label: 'OpenCode', group: '命令行', kind: 'opencode', file: 'opencode.jsonc（项目）或 opencode mcp add --global 写入的全局配置', verify: '执行 opencode mcp list，或在会话里用 /mcps 看到 aisbench 已连接。' },
+  { id: 'crush', label: 'Crush', group: '命令行', kind: 'crush', file: 'crush.json（项目根）或 ~/.config/crush/crush.json', verify: '启动 Crush 后在 MCP 面板确认 aisbench 已连接并列出 6 个工具。' },
+  { id: 'goose', label: 'Goose', group: '命令行', kind: 'goose', file: '~/.config/goose/config.yaml（也可用 goose configure 交互添加）', verify: 'goose 会话里执行 /tools，能看到 aisbench 的 6 个工具。' },
+  { id: 'amp', label: 'Amp', group: '命令行', kind: 'amp', file: '~/.config/amp/settings.json（用户级）或 .amp/settings.json（工作区，需 amp mcp approve）', verify: '让 Amp 列出可用工具，能看到 aisbench_task_list 等 6 个工具。' },
+  { id: 'droid', label: 'Factory Droid', group: '命令行', kind: 'json', file: '~/.factory/mcp.json（用户级）或 .factory/mcp.json（项目共享）', verify: '在 droid 中执行 /mcp，确认 aisbench 已连接。' },
+  { id: 'copilot', label: 'Copilot CLI', group: '命令行', kind: 'copilot', file: '~/.copilot/mcp-config.json（或 copilot mcp add aisbench -- npx -y aisbench-mcp）', verify: '在 copilot 交互模式执行 /mcp，看到 aisbench 及工具列表。' },
+  { id: 'dsh', label: 'DeepSeek Harness（CLI / Web）', group: '命令行', kind: 'note', file: 'dsh Settings → Plugins → MCP（Web UI 可用 npx @deepseek-ai/dsh web 启动）', verify: '在 dsh 的 MCP / 工具列表确认 aisbench 已连接。' },
+  { id: 'openclaw', label: 'OpenClaw', group: '命令行', kind: 'openclaw', file: 'openclaw mcp add 写入 OpenClaw 配置的 mcp.servers', verify: 'openclaw mcp probe aisbench 能连上并列出 6 个工具；改动与探测前需停止 Gateway。' },
   { id: 'claude-desktop', label: 'Claude Desktop', group: '桌面 / IDE', kind: 'json', file: 'macOS：~/Library/Application Support/Claude/claude_desktop_config.json；Windows：%APPDATA%\\Claude\\claude_desktop_config.json', verify: '重启 Claude Desktop，在工具入口看到 aisbench。' },
   { id: 'cursor', label: 'Cursor', group: '桌面 / IDE', kind: 'json', file: '~/.cursor/mcp.json（或在 Settings → MCP 中编辑）', verify: '在 Cursor 的 MCP 面板看到 aisbench 已连接。' },
   { id: 'windsurf', label: 'Windsurf', group: '桌面 / IDE', kind: 'json', file: '~/.codeium/windsurf/mcp_config.json', verify: '在 Cascade 的 MCP 面板确认 aisbench 已连接。' },
@@ -72,11 +138,15 @@ const CLIENTS = [
   { id: 'cline', label: 'Cline', group: '桌面 / IDE', kind: 'json', file: '扩展：MCP Servers → Configure MCP Servers（cline_mcp_settings.json）；CLI：~/.cline/mcp.json', verify: '保存后在 MCP 面板看到 6 个工具。' },
   { id: 'continue', label: 'Continue', group: '桌面 / IDE', kind: 'yaml', file: '~/.continue/config.yaml（旧版为 config.json）', verify: '重载窗口后，工具出现在 Continue 的可用工具中。' },
   { id: 'zed', label: 'Zed', group: '桌面 / IDE', kind: 'zed', file: 'Settings → AI → MCP Servers（写入 settings.json 的 context_servers）', verify: '在 Agent 面板看到自定义 server 已连接。' },
+  { id: 'kiro', label: 'Kiro', group: '桌面 / IDE', kind: 'json', file: '~/.kiro/settings/mcp.json（用户级）或 .kiro/settings/mcp.json（工作区）', verify: '在 Kiro 的 MCP Servers 面板看到 aisbench 已连接。' },
+  { id: 'dsh-desktop', label: 'DeepSeek Harness 桌面版', group: '桌面 / IDE', kind: 'note-desktop', file: '官方桌面版（Windows / macOS）；第三方 DSH Desktop 等封装复用 ~/.dsh 配置', verify: '在桌面版 Settings → Plugins → MCP 里看到 aisbench 已连接。' },
   { id: 'trae', label: 'Trae', group: '国产 IDE', kind: 'json', file: '设置 → MCP → 添加（粘贴 mcpServers JSON）', verify: '在 MCP 列表确认 aisbench 已连接。' },
   { id: 'tongyi', label: '通义灵码', group: '国产 IDE', kind: 'json', file: 'MCP 服务 → 我的服务 → 添加（STDIO 表单：命令/参数/环境变量）', verify: '在 MCP 服务列表确认连接状态。' },
   { id: 'qoder', label: 'Qoder', group: '国产 IDE', kind: 'json', file: '~/.qoder/mcp.json（国内版 ~/.qoder-cn/mcp.json）', verify: '在 MCP 列表确认 aisbench 已连接。' },
   { id: 'codebuddy', label: 'CodeBuddy', group: '国产 IDE', kind: 'json', file: '设置 → MCP（写入 mcpServers 配置）', verify: '在 MCP 列表确认 aisbench 已连接。' },
   { id: 'wenxin', label: '文心快码', group: '国产 IDE', kind: 'json', file: '官方 MCP 面板（JSON 字段以当前版本文档为准）', verify: '在 MCP 列表确认 aisbench 已连接。' },
+  { id: 'qwen', label: 'Qwen Code', group: '国产 IDE', kind: 'json', file: '~/.qwen/settings.json（用户级）或 .qwen/settings.json（项目）', verify: '在 qwen 中执行 /mcp，确认 aisbench 已连接并列出 6 个工具。' },
+  { id: 'kimi', label: 'Kimi Code CLI', group: '国产 IDE', kind: 'json', file: '~/.kimi/mcp.json（或项目 .kimi-code/mcp.json）', verify: '在 kimi 中执行 /mcp 或 /mcp-config，确认 aisbench 已连接。' },
   { id: 'http', label: 'HTTP 兜底（无 MCP）', group: '其他', kind: 'http', file: '无需配置客户端，直接调用平台 API', verify: '/api/agent/me 返回你的账号信息即接通。' },
 ];
 const CLIENT_GROUPS = ['命令行', '桌面 / IDE', '国产 IDE', '其他'];
@@ -171,6 +241,15 @@ function snippetFor(client, origin, token, mcp) {
   if (client.kind === 'vscode') return vscodeJson(origin, token, mcp);
   if (client.kind === 'zed') return zedJson(origin, token, mcp);
   if (client.kind === 'yaml') return continueYaml(origin, token, mcp);
+  if (client.kind === 'pi') return piCli(origin, token, mcp);
+  if (client.kind === 'opencode') return opencodeJson(origin, token, mcp);
+  if (client.kind === 'amp') return ampJson(origin, token, mcp);
+  if (client.kind === 'crush') return crushJson(origin, token, mcp);
+  if (client.kind === 'goose') return gooseYaml(origin, token, mcp);
+  if (client.kind === 'copilot') return copilotJson(origin, token, mcp);
+  if (client.kind === 'openclaw') return openclawCli(origin, token, mcp);
+  if (client.kind === 'note') return dshSteps(origin, token, mcp);
+  if (client.kind === 'note-desktop') return dshDesktopSteps(origin, token, mcp);
   return genericJson(origin, token, mcp);
 }
 
