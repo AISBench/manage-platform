@@ -13,3 +13,4 @@ playwright-report/
 test-results/
 *.log
 coverage/
+agent-mcp/*.tgz

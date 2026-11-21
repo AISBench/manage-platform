@@ -11,8 +11,8 @@ async function setup(t, initial = profile(), config = {}) {
   const fetchImpl = async url => new Response(JSON.stringify(String(url).includes('access_token') ? { access_token: 'never-persist-token' } : current), { status: 200, headers: { 'Content-Type': 'application/json' } });
   const f = await httpFixture(t, { fetchImpl, config: { tokenEncryptionKey: key, ...config } });
   const anonymous = f.client(null);
-  async function oauth() {
-    const start = await anonymous.request('/auth/github');
+  async function oauth(returnTo) {
+    const start = await anonymous.request(`/auth/github${returnTo ? `?${new URLSearchParams({ returnTo })}` : ''}`);
     const state = new URL(start.response.headers.get('location')).searchParams.get('state');
     return anonymous.request(`/auth/github/callback?state=${state}&code=test-code`);
   }
@@ -53,6 +53,26 @@ test('first GitHub login creates an active member and reuses it on later logins'
   assert.equal(second.data.user.login, 'renamed-alice');
   assert.equal(second.data.user.avatarUrl, 'https://avatars.githubusercontent.com/u/501?v=9');
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM members WHERE github_user_id='501'").get().n, 1);
+});
+
+test('GitHub authorization returns to the item page for a CI retry intent', async t => {
+  const f = await setup(t);
+  const callback = await f.oauth('/workspace/items/github%3A675?ci=evt-1&ciName=ci');
+  assert.equal(callback.status, 302);
+  const location = callback.response.headers.get('location');
+  assert.match(location, /^\/workspace\/items\/github(?:%3A|:)675\?/);
+  assert.match(location, /ci=evt-1/);
+  assert.match(location, /ciName=ci/);
+  assert.match(location, /auth=success/);
+});
+
+test('GitHub authorization never returns to paths outside the workspace', async t => {
+  const f = await setup(t);
+  for (const value of ['https://evil.example/workspace', '/admin/access-policy', '/workspace/items/../settings', '/workspace/items/a/b']) {
+    const callback = await f.oauth(value);
+    assert.equal(callback.status, 302);
+    assert.equal(callback.response.headers.get('location'), '/workspace?auth=success', `rejected ${value}`);
+  }
 });
 
 test('OAuth callback reports GitHub connectivity failures with an actionable message', async t => {

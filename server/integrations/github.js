@@ -358,6 +358,10 @@ export async function fetchPullRequestDetail({ repo, number, token, fetchImpl = 
   if (!data || data.number !== number) throw new IntegrationError('GitHub returned invalid pull request data');
   return data;
 }
+export async function fetchPullRequestFiles({ repo, number, token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  return paginate(`${base}/pulls/${issueNumber(number)}/files?per_page=100&page=1`, request, data => data);
+}
 export async function fetchPullCheckRuns({ repo, ref, token, fetchImpl = fetch }) {
   const { base, request } = reader(repo, token, fetchImpl);
   return paginate(`${base}/commits/${refValue(ref)}/check-runs?per_page=100&page=1&filter=latest`, request, data => data.check_runs);
@@ -377,6 +381,53 @@ export async function createIssueComment({ repo, number, token, body, fetchImpl 
   });
   if (!data || !Number.isSafeInteger(data.id) || typeof data.html_url !== 'string' || typeof data.created_at !== 'string') {
     throw new IntegrationError('GitHub returned invalid comment data');
+  }
+  return data;
+}
+
+// Reply inside an existing inline review thread. GitHub has no threaded reply
+// for ordinary issue comments, so callers must anchor to a review comment id.
+export async function createPullReviewCommentReply({ repo, number, commentId, token, body, fetchImpl = fetch }) {
+  const { base } = reader(repo, token, fetchImpl, 20000);
+  if (typeof body !== 'string' || !body.trim() || body.length > 65536 || body.includes('\u0000')) throw new IntegrationError('Invalid GitHub review reply');
+  requiredString(token, 'GitHub write token');
+  if (typeof commentId !== 'string' || !/^[1-9]\d*$/.test(commentId)) throw new IntegrationError('Invalid GitHub review comment id');
+  const headers = { Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}` };
+  const { data } = await requestJson(`${base}/pulls/${issueNumber(number)}/comments/${commentId}/replies`, {
+    fetchImpl, timeoutMs: 20000, headers, method: 'POST', body: JSON.stringify({ body }), label: 'GitHub review reply',
+  });
+  if (!data || !Number.isSafeInteger(data.id) || typeof data.html_url !== 'string' || typeof data.created_at !== 'string') {
+    throw new IntegrationError('GitHub returned invalid review reply data');
+  }
+  return data;
+}
+
+// Submit several line-anchored findings as one COMMENT review. GitHub rejects
+// the whole review (422) when any line is outside the diff, so callers should
+// validate anchors before publishing.
+export async function createPullRequestReview({ repo, number, token, body, comments, fetchImpl = fetch }) {
+  const { base } = reader(repo, token, fetchImpl, 20000);
+  requiredString(token, 'GitHub write token');
+  if (!Array.isArray(comments) || comments.length < 1 || comments.length > 20) throw new IntegrationError('Invalid GitHub review comments');
+  const payloadComments = comments.map(comment => {
+    if (!comment || typeof comment.path !== 'string' || !comment.path || comment.path.startsWith('/') || comment.path.split('/').includes('..')) throw new IntegrationError('Invalid GitHub review comment path');
+    if (!Number.isSafeInteger(comment.line) || comment.line < 1 || comment.line > 1000000) throw new IntegrationError('Invalid GitHub review comment line');
+    if (!['LEFT', 'RIGHT'].includes(comment.side)) throw new IntegrationError('Invalid GitHub review comment side');
+    if (typeof comment.body !== 'string' || !comment.body.trim() || comment.body.length > 4000) throw new IntegrationError('Invalid GitHub review comment body');
+    const entry = { path: comment.path, line: comment.line, side: comment.side, body: comment.body };
+    if (comment.start_line !== undefined) {
+      if (!Number.isSafeInteger(comment.start_line) || comment.start_line < 1 || comment.start_line > comment.line) throw new IntegrationError('Invalid GitHub review comment start line');
+      entry.start_line = comment.start_line;
+    }
+    return entry;
+  });
+  const headers = { Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}` };
+  const { data } = await requestJson(`${base}/pulls/${issueNumber(number)}/reviews`, {
+    fetchImpl, timeoutMs: 20000, headers, method: 'POST', label: 'GitHub review',
+    body: JSON.stringify({ body: typeof body === 'string' ? body : '', event: 'COMMENT', comments: payloadComments }),
+  });
+  if (!data || !Number.isSafeInteger(data.id) || typeof data.html_url !== 'string' || typeof data.state !== 'string') {
+    throw new IntegrationError('GitHub returned invalid review data');
   }
   return data;
 }
