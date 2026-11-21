@@ -375,8 +375,13 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
   });
   app.get('/api/items/unread',(req,res)=>{z.object({}).strict().parse(req.query);const summary=unreadSummary(db,req.member.id);res.json({items:summary,total:Object.values(summary).reduce((sum,item)=>sum+item.unread,0),mentions:Object.values(summary).reduce((sum,item)=>sum+item.mentions,0)});});
   app.get('/api/items',(req,res)=>{
-    let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,unread,mentions,label}=req.query;
+    let items=allItems();const {kind,state='open',mine,q,ownerMemberId,unassigned,ownerIssue,needsReview,module,unread,mentions,label,reviewRequested}=req.query;
+    if(reviewRequested!==undefined&&reviewRequested!=='me') throw fail(400,'评审邀请筛选仅支持 me');
     if(kind) items=items.filter(i=>i.kind===kind);
+    if(reviewRequested==='me') {
+      const githubId=String(req.member.github_user_id || '');
+      items=items.filter(i=>i.kind==='pr'&&githubId&&(i.reviewerIds||[]).some(id=>String(id)===githubId));
+    }
     if(label) items=items.filter(i=>hasLabel(i,label));
     if(state!=='all') items=items.filter(i=>i.state===state);
     if(mine==='true') items=items.filter(i=>isParticipant(i,req.user));
