@@ -34,7 +34,7 @@ test('versioned additive migration retains all original row data and reopens ide
   old.prepare('INSERT INTO items(id,number,data,workflow,owner,priority,due_at) VALUES (?,?,?,?,?,?,?)').run('legacy', 9, '{"title":"Legacy edit"}', 'blocked', 'alice', 'high', '2030-01-01');
   old.prepare('INSERT INTO settings(key,value) VALUES (?,?)').run('custom', JSON.stringify({ keep: true })); old.close();
   let db = openDatabase(filename);
-  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
   assert.ok(db.prepare('PRAGMA table_info(members)').all().some(column => column.name === 'avatar_url'), 'schema v4 adds the member avatar column');
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='item_messages'").get(), 'schema v5 adds the conversation tables');
   assert.ok(db.prepare('PRAGMA table_info(item_messages)').all().some(column => column.name === 'diff_hunk'), 'schema v6 stores review diff hunks');
@@ -48,6 +48,11 @@ test('versioned additive migration retains all original row data and reopens ide
   assert.ok(db.prepare('PRAGMA table_info(agent_drafts)').all().some(column => column.name === 'agent_name'), 'schema v13 records the generating Agent');
   assert.ok(db.prepare('PRAGMA table_info(agent_tasks)').all().some(column => column.name === 'message_id'), 'schema v14 anchors a task to a review comment');
   assert.ok(db.prepare('PRAGMA table_info(agent_drafts)').all().some(column => column.name === 'comments_json'), 'schema v15 stores line-anchored review findings');
+  const taskColumns = db.prepare('PRAGMA table_info(agent_tasks)').all();
+  assert.equal(taskColumns.find(column => column.name === 'item_id')?.notnull, 0, 'schema v17 makes agent task item optional');
+  assert.ok(taskColumns.some(column => column.name === 'kind'), 'schema v17 records the agent task kind');
+  assert.ok(taskColumns.some(column => column.name === 'anchor_key'), 'schema v17 anchors idempotency explicitly');
+  assert.ok(db.prepare('PRAGMA table_info(agent_drafts)').all().some(column => column.name === 'payload_json'), 'schema v17 stores structured drafts');
   for (const table of ['agent_tokens', 'agent_tasks', 'agent_drafts']) {
     assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table), `schema v12 creates ${table}`);
   }
@@ -56,7 +61,7 @@ test('versioned additive migration retains all original row data and reopens ide
   assert.equal(getSetting(db, 'membershipInitialized', false), false); assert.deepEqual(getSetting(db, 'custom'), { keep: true });
   assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
   const before = snapshot(db); db.close(); db = openDatabase(filename);
-  assert.equal(snapshot(db), before); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 16);
+  assert.equal(snapshot(db), before); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get().n, 17);
   assert.throws(() => db.prepare("INSERT INTO users(id,login,member_id) VALUES ('2','bob','missing')").run());
   db.close();
 });

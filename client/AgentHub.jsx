@@ -3,6 +3,9 @@ import { Bot, Check, CircleAlert, Clock3, Copy, ExternalLink, KeyRound, LoaderCi
 import { api } from './api.js';
 import { Badge, Empty, Spinner } from './ui.jsx';
 import Markdown from './Markdown.jsx';
+import IssueCreate from './IssueCreate.jsx';
+import IssuePicker from './IssuePicker.jsx';
+import AgentDraft from './AgentDraft.jsx';
 
 const STATUS = {
   queued: ['blue', '等待 Agent 领取'],
@@ -98,7 +101,7 @@ dsh plugin --profile web add @deepseek-ai/dsh-mcp-client
 #    env:     AISBENCH_URL=${origin}
 #             AISBENCH_TOKEN=${token}
 
-# 3) 重启该 profile，在 dsh 的 MCP / 工具列表确认 aisbench 的 6 个工具`;
+# 3) 重启该 profile，在 dsh 的 MCP / 工具列表确认 aisbench 的 8 个工具`;
 }
 function dshDesktopSteps(origin, token, mcp) {
   const { command, args } = mcpOf(mcp);
@@ -112,30 +115,30 @@ function dshDesktopSteps(origin, token, mcp) {
 #    env:     AISBENCH_URL=${origin}
 #             AISBENCH_TOKEN=${token}
 
-# 3) 在桌面版的 MCP / 工具列表确认 aisbench 的 6 个工具`;
+# 3) 在桌面版的 MCP / 工具列表确认 aisbench 的 8 个工具`;
 }
 function httpCurl(origin, token) {
   return `curl -s ${origin}/api/agent/me -H "Authorization: Bearer ${token}"\ncurl -s ${origin}/api/agent/tasks -H "Authorization: Bearer ${token}"\ncurl -s -X POST ${origin}/api/agent/kb/search \\\n  -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \\\n  -d '{"repo":"AISBench/benchmark","question":"评测结果 JSON 有哪些字段"}'`;
 }
 
 const CLIENTS = [
-  { id: 'claude-code', label: 'Claude Code', group: '命令行', kind: 'cli', file: '在项目目录执行下面的命令', verify: '在 Claude Code 中执行 /mcp，能看到 aisbench 及 6 个工具。' },
+  { id: 'claude-code', label: 'Claude Code', group: '命令行', kind: 'cli', file: '在项目目录执行下面的命令', verify: '在 Claude Code 中执行 /mcp，能看到 aisbench 及 8 个工具。' },
   { id: 'codex', label: 'Codex CLI', group: '命令行', kind: 'toml', file: '~/.codex/config.toml', verify: '重启 codex 后执行 /mcp，能看到 aisbench。' },
   { id: 'gemini', label: 'Gemini CLI', group: '命令行', kind: 'json', file: '~/.gemini/settings.json', verify: '重启后执行 /mcp，能看到 aisbench 的工具列表。' },
-  { id: 'pi', label: 'Pi', group: '命令行', kind: 'pi', file: '~/.pi/agent/mcp.json（用 pi mcp add 写入，加 -l 写入项目 .pi/mcp.json）', verify: '执行 pi mcp list，看到 aisbench 已连接并列出 6 个工具。' },
+  { id: 'pi', label: 'Pi', group: '命令行', kind: 'pi', file: '~/.pi/agent/mcp.json（用 pi mcp add 写入，加 -l 写入项目 .pi/mcp.json）', verify: '执行 pi mcp list，看到 aisbench 已连接并列出 8 个工具。' },
   { id: 'opencode', label: 'OpenCode', group: '命令行', kind: 'opencode', file: 'opencode.jsonc（项目）或 opencode mcp add --global 写入的全局配置', verify: '执行 opencode mcp list，或在会话里用 /mcps 看到 aisbench 已连接。' },
-  { id: 'crush', label: 'Crush', group: '命令行', kind: 'crush', file: 'crush.json（项目根）或 ~/.config/crush/crush.json', verify: '启动 Crush 后在 MCP 面板确认 aisbench 已连接并列出 6 个工具。' },
-  { id: 'goose', label: 'Goose', group: '命令行', kind: 'goose', file: '~/.config/goose/config.yaml（也可用 goose configure 交互添加）', verify: 'goose 会话里执行 /tools，能看到 aisbench 的 6 个工具。' },
-  { id: 'amp', label: 'Amp', group: '命令行', kind: 'amp', file: '~/.config/amp/settings.json（用户级）或 .amp/settings.json（工作区，需 amp mcp approve）', verify: '让 Amp 列出可用工具，能看到 aisbench_task_list 等 6 个工具。' },
+  { id: 'crush', label: 'Crush', group: '命令行', kind: 'crush', file: 'crush.json（项目根）或 ~/.config/crush/crush.json', verify: '启动 Crush 后在 MCP 面板确认 aisbench 已连接并列出 8 个工具。' },
+  { id: 'goose', label: 'Goose', group: '命令行', kind: 'goose', file: '~/.config/goose/config.yaml（也可用 goose configure 交互添加）', verify: 'goose 会话里执行 /tools，能看到 aisbench 的 8 个工具。' },
+  { id: 'amp', label: 'Amp', group: '命令行', kind: 'amp', file: '~/.config/amp/settings.json（用户级）或 .amp/settings.json（工作区，需 amp mcp approve）', verify: '让 Amp 列出可用工具，能看到 aisbench_task_list 等 8 个工具。' },
   { id: 'droid', label: 'Factory Droid', group: '命令行', kind: 'json', file: '~/.factory/mcp.json（用户级）或 .factory/mcp.json（项目共享）', verify: '在 droid 中执行 /mcp，确认 aisbench 已连接。' },
   { id: 'copilot', label: 'Copilot CLI', group: '命令行', kind: 'copilot', file: '~/.copilot/mcp-config.json（或 copilot mcp add aisbench -- npx -y aisbench-mcp）', verify: '在 copilot 交互模式执行 /mcp，看到 aisbench 及工具列表。' },
   { id: 'dsh', label: 'DeepSeek Harness（CLI / Web）', group: '命令行', kind: 'note', file: 'dsh Settings → Plugins → MCP（Web UI 可用 npx @deepseek-ai/dsh web 启动）', verify: '在 dsh 的 MCP / 工具列表确认 aisbench 已连接。' },
-  { id: 'openclaw', label: 'OpenClaw', group: '命令行', kind: 'openclaw', file: 'openclaw mcp add 写入 OpenClaw 配置的 mcp.servers', verify: 'openclaw mcp probe aisbench 能连上并列出 6 个工具；改动与探测前需停止 Gateway。' },
+  { id: 'openclaw', label: 'OpenClaw', group: '命令行', kind: 'openclaw', file: 'openclaw mcp add 写入 OpenClaw 配置的 mcp.servers', verify: 'openclaw mcp probe aisbench 能连上并列出 8 个工具；改动与探测前需停止 Gateway。' },
   { id: 'claude-desktop', label: 'Claude Desktop', group: '桌面 / IDE', kind: 'json', file: 'macOS：~/Library/Application Support/Claude/claude_desktop_config.json；Windows：%APPDATA%\\Claude\\claude_desktop_config.json', verify: '重启 Claude Desktop，在工具入口看到 aisbench。' },
   { id: 'cursor', label: 'Cursor', group: '桌面 / IDE', kind: 'json', file: '~/.cursor/mcp.json（或在 Settings → MCP 中编辑）', verify: '在 Cursor 的 MCP 面板看到 aisbench 已连接。' },
   { id: 'windsurf', label: 'Windsurf', group: '桌面 / IDE', kind: 'json', file: '~/.codeium/windsurf/mcp_config.json', verify: '在 Cascade 的 MCP 面板确认 aisbench 已连接。' },
   { id: 'vscode', label: 'VS Code (Copilot)', group: '桌面 / IDE', kind: 'vscode', file: '.vscode/mcp.json（工作区）或用户级 mcp.json', verify: '在 MCP 面板启动 aisbench 并看到工具列表。' },
-  { id: 'cline', label: 'Cline', group: '桌面 / IDE', kind: 'json', file: '扩展：MCP Servers → Configure MCP Servers（cline_mcp_settings.json）；CLI：~/.cline/mcp.json', verify: '保存后在 MCP 面板看到 6 个工具。' },
+  { id: 'cline', label: 'Cline', group: '桌面 / IDE', kind: 'json', file: '扩展：MCP Servers → Configure MCP Servers（cline_mcp_settings.json）；CLI：~/.cline/mcp.json', verify: '保存后在 MCP 面板看到 8 个工具。' },
   { id: 'continue', label: 'Continue', group: '桌面 / IDE', kind: 'yaml', file: '~/.continue/config.yaml（旧版为 config.json）', verify: '重载窗口后，工具出现在 Continue 的可用工具中。' },
   { id: 'zed', label: 'Zed', group: '桌面 / IDE', kind: 'zed', file: 'Settings → AI → MCP Servers（写入 settings.json 的 context_servers）', verify: '在 Agent 面板看到自定义 server 已连接。' },
   { id: 'kiro', label: 'Kiro', group: '桌面 / IDE', kind: 'json', file: '~/.kiro/settings/mcp.json（用户级）或 .kiro/settings/mcp.json（工作区）', verify: '在 Kiro 的 MCP Servers 面板看到 aisbench 已连接。' },
@@ -145,7 +148,7 @@ const CLIENTS = [
   { id: 'qoder', label: 'Qoder', group: '国产 IDE', kind: 'json', file: '~/.qoder/mcp.json（国内版 ~/.qoder-cn/mcp.json）', verify: '在 MCP 列表确认 aisbench 已连接。' },
   { id: 'codebuddy', label: 'CodeBuddy', group: '国产 IDE', kind: 'json', file: '设置 → MCP（写入 mcpServers 配置）', verify: '在 MCP 列表确认 aisbench 已连接。' },
   { id: 'wenxin', label: '文心快码', group: '国产 IDE', kind: 'json', file: '官方 MCP 面板（JSON 字段以当前版本文档为准）', verify: '在 MCP 列表确认 aisbench 已连接。' },
-  { id: 'qwen', label: 'Qwen Code', group: '国产 IDE', kind: 'json', file: '~/.qwen/settings.json（用户级）或 .qwen/settings.json（项目）', verify: '在 qwen 中执行 /mcp，确认 aisbench 已连接并列出 6 个工具。' },
+  { id: 'qwen', label: 'Qwen Code', group: '国产 IDE', kind: 'json', file: '~/.qwen/settings.json（用户级）或 .qwen/settings.json（项目）', verify: '在 qwen 中执行 /mcp，确认 aisbench 已连接并列出 8 个工具。' },
   { id: 'kimi', label: 'Kimi Code CLI', group: '国产 IDE', kind: 'json', file: '~/.kimi/mcp.json（或项目 .kimi-code/mcp.json）', verify: '在 kimi 中执行 /mcp 或 /mcp-config，确认 aisbench 已连接。' },
   { id: 'http', label: 'HTTP 兜底（无 MCP）', group: '其他', kind: 'http', file: '无需配置客户端，直接调用平台 API', verify: '/api/agent/me 返回你的账号信息即接通。' },
 ];
@@ -156,13 +159,13 @@ const CLIENT_GROUPS = ['命令行', '桌面 / IDE', '国产 IDE', '其他'];
 const AUTO_PROMPT = `检查并处理 AISBench 平台上派给我的 Agent 任务。
 
 1. 调用 aisbench_task_list 查看任务。
-2. 只处理 status=queued 的任务；claimed 表示已有另一轮在处理，直接跳过；claimed 超过 30 分钟未更新可视为中断并重新领取。
+2. 只处理 status=queued 的任务；claimed 表示已有另一轮在处理，直接跳过；claimed 超过 30 分钟未更新可视为中断并重新领取。任务带 kind：issue_create 先查重并读取模板，提交 Issue 草稿；pr_create 按上下文的 aisbench-devflow 完成开发与验证，提交 PR 结果；缺省为评论 / 检视。
 3. 没有可处理任务时直接结束，不要发送任何通知。
-4. 每轮最多处理 1 个，优先创建时间最早的：调用 aisbench_task_claim 领取。
+4. 每轮最多领取并处理 5 个任务（aisbench_task_claim 最多调用 5 次），按创建时间从早到晚依次处理：处理完一个（提交草稿后）再领取下一个；已领取 5 个或没有 queued 任务时结束本轮，不要超领。
 5. 调用 aisbench_issue_context 读取该 Issue / PR 的白名单事实；PR 会附带变更文件与 patch。需要时调用 aisbench_kb_search 检索 AISBench/benchmark 知识库。
 6. 若任务带 replyTo，只针对该条评论 / 检视意见与线程历史写回复，严格按 hint 中我的意图表达，comments 留空；否则 PR 检视：comment_md 只写不超过 600 字的总体摘要；必须输出多条 comments，每条 body 严格为「[review] [严重程度] 具体问题」换行「[suggestion] 可行解决方式」，line 使用 @@ 头中的新文件/旧文件行号，只对改动或上下文行提意见，严重程度建议 blocker/major/minor/nit，不要只写总体概述。Issue 则给出排查结论与修复或验证建议。引用真实文件路径，不要编造出处。
 7. 调用 aisbench_task_submit 提交草稿；若返回行内意见定位无效，按错误修正 comments 后重试。不要发布，发布由我在平台人工确认。
-8. 全程不修改 GitHub、不发布评论、不执行强副作用动作。`;
+8. 写操作边界按任务 kind 区分：item_review / issue_create 全程不修改 GitHub、不发布评论、不执行强副作用动作（Issue 只提交草稿）；pr_create 允许在本地修改代码、运行门禁，把分支推送到你本人 fork 并以你本人身份创建 PR，但禁止合并或启用 auto-merge、禁止 force push、禁止修改 PR 模板与标签工作流、禁止代签 DCO/CLA、禁止向目标仓库直接推送；完成后提交 pr_result 草稿等待人工验收。`;
 
 const TRAE_SCHEDULE = {
   badge: '内置自动化', tone: 'teal',
@@ -352,8 +355,20 @@ export default function AgentHub({ session, notify }) {
     </div>
     <div className="tab-group agent-tabs" role="tablist">
       <button role="tab" aria-selected={tab === 'guide'} className={tab === 'guide' ? 'active' : ''} onClick={() => setTab('guide')}><Wrench size={14} />接入指南</button>
+      <button role="tab" aria-selected={tab === 'issue'} className={tab === 'issue' ? 'active' : ''} onClick={() => setTab('issue')}><Plus size={14} />提 Issue / 提 PR</button>
       <button role="tab" aria-selected={tab === 'tasks'} className={tab === 'tasks' ? 'active' : ''} onClick={() => setTab('tasks')}><Bot size={14} />我的 Agent 任务</button>
     </div>
+
+    {tab === 'issue' && <>
+      <section className="panel agent-panel">
+        <div className="panel-title-row"><div><h2><Plus size={18} />让 Agent 提 Issue</h2><p>描述问题或需求；Agent 先查重、核验合理性，再按仓库模板出草稿，你确认后才创建。</p></div></div>
+        <IssueCreate notify={notify} />
+      </section>
+      <section className="panel agent-panel">
+        <div className="panel-title-row"><div><h2><Bot size={18} />选一个 Issue 让 Agent 提 PR</h2><p>选中开放的 Issue 后生成提 PR 任务；Agent 在本机按 aisbench-devflow 开发与验证，用你的身份开 PR。</p></div></div>
+        <IssuePicker notify={notify} />
+      </section>
+    </>}
 
     {tab === 'guide' && <>
       <section className="panel agent-panel">
@@ -412,11 +427,13 @@ export default function AgentHub({ session, notify }) {
           const isOpen = expanded === draft.id;
           return <article className={`agent-draft ${isOpen ? 'is-open' : ''}`} key={draft.id}>
             <button className="agent-draft-head" onClick={() => setExpanded(isOpen ? '' : draft.id)} aria-expanded={isOpen}>
-              <div><strong>#{draft.task?.number} {draft.task?.item?.title || '（标题缺失）'}</strong><small>{draft.summary || '无摘要'} · {new Date(draft.createdAt).toLocaleString('zh-CN')}{draft.agentName ? ` · Agent「${draft.agentName}」` : ''}{draft.model ? ` · ${draft.model}` : ''}</small></div>
+              <div><strong>{draft.task?.number ? `#${draft.task.number} ` : ''}{draft.task?.item?.title || draft.payload?.title || '（标题缺失）'}</strong><small>{draft.summary || '无摘要'} · {new Date(draft.createdAt).toLocaleString('zh-CN')}{draft.agentName ? ` · Agent「${draft.agentName}」` : ''}{draft.model ? ` · ${draft.model}` : ''}</small></div>
               <Badge tone={tone}>{label}</Badge>
             </button>
             {draft.publishError && <p className="agent-adaptor-status is-red"><CircleAlert size={13} />{draft.publishError}</p>}
-            {isOpen && <div className="agent-draft-body">
+            {isOpen && (draft.kind === 'issue_create' || draft.kind === 'pr_result'
+              ? <AgentDraft draft={draft} notify={notify} onChanged={async () => { await loadDrafts(); }} />
+              : <div className="agent-draft-body">
               <h4>Review 摘要 / 评论正文</h4>
               <Markdown text={draft.commentMd} empty="（空）" />
               {!!draft.comments?.length && <><h4>行内检视意见（{draft.comments.length} 条）</h4><div className="agent-comments">{draft.comments.map((comment, index) => <div className="agent-comment is-selected" key={index}><span><strong>{comment.path}:{comment.line} · {comment.side === 'LEFT' ? '旧代码' : '新代码'}</strong><Markdown text={comment.body} /></span></div>)}</div></>}
@@ -430,7 +447,7 @@ export default function AgentHub({ session, notify }) {
                   <button className="btn btn-primary btn-small" disabled={busy === draft.id} onClick={() => publish(draft)}>{busy === draft.id ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}确认发布</button>
                 </div> : draft.commentUrl ? <a className="external-text-link" href={draft.commentUrl} target="_blank" rel="noreferrer">查看已发布评论<ExternalLink size={12} /></a> : null}
               </div>
-            </div>}
+            </div>)}
           </article>;
         })}
       </div>}

@@ -31,7 +31,7 @@ function assert(condition, message) {
 
 const { tools } = await client.listTools();
 const names = tools.map(tool => tool.name).sort();
-assert(names.includes('aisbench_kb_search') && names.includes('aisbench_task_submit') && tools.length === 6, `tools/list 返回 6 个工具：${names.join(', ')}`);
+assert(names.includes('aisbench_kb_search') && names.includes('aisbench_task_submit') && names.includes('aisbench_issue_search') && names.includes('aisbench_issue_templates') && tools.length === 8, `tools/list 返回 8 个工具：${names.join(', ')}`);
 
 const tasks = JSON.parse(textOf(await client.callTool({ name: 'aisbench_task_list', arguments: {} })));
 assert(Array.isArray(tasks.tasks) && tasks.tasks.some(task => task.id === TASK_ID), 'task_list 能看到待处理任务');

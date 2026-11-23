@@ -26,11 +26,16 @@ export function openDatabase(filename) {
   const db = new DatabaseSync(filename);
   try {
     db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+    // v17 rebuilds agent_tasks while agent_drafts still references it. SQLite
+    // cannot change foreign-key enforcement inside a transaction, so decide
+    // before BEGIN and restore it after the migration commits.
+    db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    const pendingV17 = !db.prepare('SELECT 1 FROM schema_migrations WHERE version=17').get();
+    if (pendingV17) db.exec('PRAGMA foreign_keys=OFF');
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
       const applied = new Set(db.prepare('SELECT version FROM schema_migrations').all().map(row => row.version));
-      if ([...applied].some(version => version > 16)) throw new Error('Database schema is newer than this application');
+      if ([...applied].some(version => version > 17)) throw new Error('Database schema is newer than this application');
       if (!applied.has(1)) {
         db.exec(legacySchema);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(1, new Date().toISOString());
@@ -308,10 +313,43 @@ export function openDatabase(filename) {
           WHERE status IN ('queued','claimed','submitted');`);
         db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(16, new Date().toISOString());
       }
+      if (!applied.has(17)) {
+        // Generalise Agent tasks. Issue drafting has no item, and a PR task is
+        // anchored to the issue it implements, so item_id must be nullable and
+        // idempotency moves to an explicit anchor_key. agent_drafts records
+        // which kind of draft it is and its structured payload.
+        db.exec(`CREATE TABLE agent_tasks_new (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL DEFAULT 'item_review' CHECK(kind IN ('item_review','issue_create','pr_create')),
+          item_id TEXT REFERENCES items(id),
+          repo TEXT NOT NULL,
+          number INTEGER,
+          member_id TEXT NOT NULL REFERENCES members(id),
+          hint TEXT NOT NULL DEFAULT '',
+          anchor_key TEXT NOT NULL,
+          message_id TEXT,
+          review_comment_id TEXT,
+          status TEXT NOT NULL DEFAULT 'queued',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL);
+        INSERT INTO agent_tasks_new(id,kind,item_id,repo,number,member_id,hint,anchor_key,message_id,review_comment_id,status,created_at,updated_at,expires_at)
+          SELECT id,'item_review',item_id,repo,number,member_id,hint,'item_review:'||item_id||':'||COALESCE(message_id,''),message_id,review_comment_id,status,created_at,updated_at,expires_at FROM agent_tasks;
+        DROP TABLE agent_tasks;
+        ALTER TABLE agent_tasks_new RENAME TO agent_tasks;
+        CREATE INDEX IF NOT EXISTS agent_tasks_member_status ON agent_tasks(member_id,status);
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_tasks_active_anchor
+          ON agent_tasks(member_id,anchor_key) WHERE status IN ('queued','claimed','submitted');`);
+        addColumn(db, 'agent_drafts', 'kind', "TEXT NOT NULL DEFAULT 'item_comment'");
+        addColumn(db, 'agent_drafts', 'payload_json', "TEXT NOT NULL DEFAULT '{}'");
+        if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('Foreign key check failed after schema v17');
+        db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(17, new Date().toISOString());
+      }
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('accessPolicy', ?)").run(JSON.stringify({ publicOverviewEnabled: false, version: 1 }));
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('rules', ?)").run(JSON.stringify({ enabled: false, staleHours: 48, reminderCooldownHours: 24 }));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
+    if (pendingV17) db.exec('PRAGMA foreign_keys=ON');
     return db;
   } catch (error) { db.close(); throw error; }
 }

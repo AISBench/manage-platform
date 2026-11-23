@@ -53,5 +53,7 @@ export class PlatformClient {
   itemContext(itemId) { return this.call(`/api/agent/items/${encodeURIComponent(itemId)}/context`); }
   kbSearch({ repo, question, topK }) { return this.call('/api/agent/kb/search', { method: 'POST', body: { repo, question, ...(topK ? { topK } : {}) } }); }
   kbWiki({ repo, topic }) { return this.call('/api/agent/kb/wiki', { query: { repo, topic } }); }
+  issueTemplates() { return this.call('/api/agent/issue-templates'); }
+  issueSearch({ query, state, label }) { return this.call('/api/agent/issues/search', { query: { q: query, state, label } }); }
   submit(taskId, draft) { return this.call(`/api/agent/tasks/${encodeURIComponent(taskId)}/submit`, { method: 'POST', body: { draft } }); }
 }

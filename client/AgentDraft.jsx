@@ -3,13 +3,21 @@ import { Check, CircleAlert, ExternalLink, LoaderCircle } from 'lucide-react';
 import { api } from './api.js';
 import { Badge } from './ui.jsx';
 import Markdown from './Markdown.jsx';
+import AgentIssueDraft from './AgentIssueDraft.jsx';
+import AgentPrDraft from './AgentPrDraft.jsx';
 
 const DRAFT_STATUS = { pending: ['amber', '待审阅'], published: ['green', '已发布'], declined: ['neutral', '已驳回'] };
 const ACTION_LABELS = { add_label: '添加标签', remove_label: '移除标签', assign: '指派', close: '关闭 Issue / PR', reopen: '重新打开' };
 
 // Shared by the Agent Hub list and the item detail dialog. Drafts are always
 // human-confirmed: nothing is written to GitHub until 确认发布 is clicked.
-export default function AgentDraft({ draft, replyTo = null, notify, onChanged }) {
+export default function AgentDraft(props) {
+  if (props.draft?.kind === 'issue_create') return <AgentIssueDraft {...props} />;
+  if (props.draft?.kind === 'pr_result') return <AgentPrDraft {...props} />;
+  return <ItemDraft {...props} />;
+}
+
+function ItemDraft({ draft, replyTo = null, notify, onChanged }) {
   const [selected, setSelected] = useState([]);
   const [selectedComments, setSelectedComments] = useState([]);
   const [busy, setBusy] = useState(false);

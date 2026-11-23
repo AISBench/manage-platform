@@ -19,7 +19,7 @@ function TaskRow({ task, isPr, onOpen }) {
   const draft = task.draft;
   const anchor = task.replyTo
     ? `回复 @${task.replyTo.author || '评论人'}${task.replyTo.path ? ` · ${task.replyTo.path}${task.replyTo.line ? `:${task.replyTo.line}` : ''}` : ''}`
-    : (isPr ? 'PR 整体检视' : '整体处理');
+    : task.kind === 'pr_create' ? '基于此 Issue 提 PR' : (isPr ? 'PR 整体检视' : '整体处理');
   const statusText = task.status === 'queued' ? '等待你的 Agent 领取…' : task.status === 'claimed' ? 'Agent 正在处理…' : task.draft ? '' : '未生成草稿';
   return <div className="agent-task-row">
     <div className="agent-task-row-head"><strong>{anchor}</strong><Badge tone={tone}>{label}</Badge></div>
@@ -74,6 +74,17 @@ export default function AgentTask({ item, notify }) {
     finally { setSubmitting(false); }
   }
 
+  async function createPr() {
+    setSubmitting(true);
+    try {
+      const result = await api(`/api/items/${encodeURIComponent(item.id)}/agent-task`, { method: 'POST', body: { kind: 'pr_create', ...(hint.trim() ? { hint: hint.trim() } : {}) } });
+      setShowHint(false); setHint('');
+      notify?.(result.created ? '已创建提 PR 任务，等待你的 Agent 领取。' : '已有进行中的提 PR 任务。');
+      await load();
+    } catch (e) { notify?.(e.message, 'error'); }
+    finally { setSubmitting(false); }
+  }
+
   if (!['issue', 'pr'].includes(item.kind) || item.state !== 'open') return null;
   const isPr = item.kind === 'pr';
   const active = tasks.filter(task => ACTIVE.includes(task.status));
@@ -89,6 +100,7 @@ export default function AgentTask({ item, notify }) {
 
     <div className="agent-adaptor-actions">
       <button type="button" className="btn btn-secondary btn-small" disabled={submitting} onClick={create}>{submitting ? <LoaderCircle size={13} className="spin" /> : <Sparkles size={13} />}{isPr ? '新建 PR 检视任务' : '交给我的 agent'}</button>
+      {!isPr && <button type="button" className="btn btn-primary btn-small" disabled={submitting} onClick={createPr}>{submitting ? <LoaderCircle size={13} className="spin" /> : <Sparkles size={13} />}让 Agent 修这个 Issue / 提 PR</button>}
       <button type="button" className="text-button" onClick={() => setShowHint(value => !value)}>{showHint ? '收起补充提示' : '补充提示（可选）'}</button>
     </div>
     {showHint && <textarea className="agent-adaptor-hint" rows={3} maxLength={500} value={hint} onChange={event => setHint(event.target.value)} placeholder={isPr ? '可选：告诉 Agent 本轮检视重点（正确性、兼容性、测试覆盖、风险等，最多 500 字）' : '可选：告诉 Agent 重点关注什么（最多 500 字）'} />}
