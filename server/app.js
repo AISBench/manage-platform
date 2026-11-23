@@ -8,13 +8,13 @@ import { z } from 'zod';
 import { openDatabase, seedDemo, listItems, getSetting, setSetting, addActivity, addAudit } from './db.js';
 import { authMiddleware, requireUser, requireAdmin, csrfGuard, newOAuthState, consumeOAuthState, createSession, cookies, hashToken, sessionUser } from './auth.js';
 import { createServices, isParticipant, nextNotificationAt } from './services.js';
-import { verifyGitHubSignature, identityId, fetchPullRequestFiles } from './integrations/github.js';
+import { verifyGitHubSignature, identityId, fetchPullRequestFiles, createIssue, searchIssues } from './integrations/github.js';
 import { exchangeFeishuCode, feishuAuthorizeUrl, sendFeishuMessage, sendFeishuWebhookMessage } from './integrations/feishu.js';
 import { deleteWebhook, decryptWebhookUrl, getWebhook, saveWebhook, webhookView } from './feishu-webhooks.js';
 import { requestJson } from './integrations/http.js';
 import { autoProvisionMemberInTransaction, githubAvatar, getMemberView, listMemberViews, updateMember, setMemberStatus } from './members.js';
 import { getAccessPolicy, updateAccessPolicy } from './access-policy.js';
-import { saveGitHubToken, deleteGitHubToken } from './github-tokens.js';
+import { saveGitHubToken, deleteGitHubToken, getGitHubToken } from './github-tokens.js';
 import { listConversation, syncItemConversation, postPlatformMessage, postPlatformReview, retryPlatformMessage, resolveItemReviewThread, rerunItemCI, recordReads, readsForMessage, unreadSummary, messageDto, getMessage } from './conversation.js';
 import { listLabels, labelWriteAccess, updateItemLabels, hasLabel } from './labels.js';
 import { createAgentAdaptorClient } from './integrations/platform-agent-adaptor.js';
@@ -22,7 +22,12 @@ import { buildItemContext } from './agent-context.js';
 import { agentDraftSchema, agentActionSchema, formatDraftError } from './agent-draft.js';
 import { validateInlineComments, inlineCommentFormatError } from './inline-review.js';
 import { createAgentToken, listAgentTokens, revokeAgentToken, resolveAgentToken } from './agent-tokens.js';
-import { createTask as createAgentTask, listTasksForMember, listTasksForItem, listQueuedForToken, getTask as getAgentTask, claimTask as claimAgentTask, submitDraft as submitAgentDraft, getDraft as getAgentDraft, getLatestDraftForItem, listDraftsForMember, markPublished, markPublishError, markDeclined } from './agent-tasks.js';
+import { createTask as createAgentTask, listTasksForMember, listTasksForItem, listQueuedForToken, getTask as getAgentTask, claimTask as claimAgentTask, submitDraft as submitAgentDraft, getDraft as getAgentDraft, getLatestDraftForItem, listDraftsForMember, markPublished, markPublishError, markDeclined, updateDraftPayload } from './agent-tasks.js';
+import { issueDraftSchema, formatIssueDraftError, inspectIssueDraft, attachDuplicateScores, duplicateBlockers, buildIssuePayload } from './agent-issue.js';
+import { prDraftSchema, formatPrDraftError, verifyPrResult } from './agent-pr.js';
+import { getIssueTemplates } from './issue-templates.js';
+import { getDevflowSkill } from './agent-skill.js';
+import { issueTaskInstructions, prTaskInstructions } from './agent-prompts.js';
 
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const version=z.number().int().positive(), id=z.string().min(1).max(100), short=z.string().trim().max(120);
@@ -212,6 +217,133 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       thread:thread.map(row=>({author:row.author_login||'',body:String(row.body||'').slice(0,1000),createdAt:row.created_at,inReplyTo:row.in_reply_to_id||''})),
     };
   }
+  // ---- Agent write paths: issue drafting (human publishes) and PR results ----
+  const issueSearchCache=new Map();
+  async function agentIssueSearch({query,state='open',label=''}) {
+    const cacheKey=`${query}|${state}|${label}`;
+    const cached=issueSearchCache.get(cacheKey);
+    if(cached&&Date.now()-cached.at<60000) return cached.items;
+    let items;
+    if(config.demo) {
+      const needle=query.toLowerCase();
+      items=allItems().filter(item=>item.kind==='issue'&&(!label||(item.labels||[]).includes(label))&&(state==='all'||item.state===state)
+        &&(`${item.number} ${item.title}`.toLowerCase().includes(needle))).slice(0,10)
+        .map(item=>({number:item.number,title:item.title||'',state:item.state||'',url:item.url||'',body:String(item.body||'').slice(0,4000),labels:item.labels||[],updatedAt:item.updatedAt||null}));
+    } else {
+      items=await searchIssues({repo:config.repo,token:config.githubToken,query,state,labels:label?[label]:[],perPage:10,fetchImpl});
+    }
+    issueSearchCache.set(cacheKey,{at:Date.now(),items});
+    if(issueSearchCache.size>200) issueSearchCache.delete(issueSearchCache.keys().next().value);
+    return items;
+  }
+  async function submitItemDraft({task,payload,agent}) {
+    const parsed=agentDraftSchema.safeParse(payload);
+    if(!parsed.success) throw fail(400,formatDraftError(parsed.error));
+    const item=allItems().find(entry=>entry.id===task.item_id);
+    if(!item) throw fail(404,'事务不存在');
+    const comments=parsed.data.comments||[];
+    if(comments.length&&item.kind!=='pr') throw fail(400,'只有 PR 检视可以提交行内意见','INLINE_COMMENT_INVALID');
+    if(task.message_id&&comments.length) throw fail(400,'回复检视意见时不能附带行内意见','INLINE_COMMENT_INVALID');
+    if(item.kind==='pr'&&!task.message_id&&!comments.length) throw fail(400,'PR 检视草稿至少需要一条行内意见','INLINE_COMMENT_REQUIRED');
+    if(item.kind==='pr'&&!task.message_id&&parsed.data.comment_md.length>600) throw fail(400,'PR 检视摘要请控制在 600 字以内，具体问题写到行内意见','REVIEW_SUMMARY_TOO_LONG');
+    for(const [index,comment] of comments.entries()) {
+      const formatError=inlineCommentFormatError(comment.body);
+      if(formatError) throw fail(400,`comments.${index}.body：${formatError}`,'INLINE_COMMENT_FORMAT');
+    }
+    if(comments.length&&!config.demo) {
+      let files;
+      try { files=await fetchPullRequestFiles({repo:config.repo,number:item.number,token:config.githubToken,fetchImpl}); }
+      catch { throw fail(502,'无法校验行内意见：读取 PR 文件失败，请稍后重试','REVIEW_FILES_UNAVAILABLE'); }
+      const error=validateInlineComments(files,comments);
+      if(error) throw fail(400,`行内意见定位无效：${error}`,'INLINE_COMMENT_INVALID');
+    }
+    return submitAgentDraft(db,{taskId:task.id,memberId:agent.memberId,draft:parsed.data,agentName:agent.agentName,agentTokenPrefix:agent.tokenPrefix});
+  }
+  async function submitIssueDraft({task,payload,agent}) {
+    // MCP clients fill defaults for their own tool schema; keep only the fields
+    // this draft kind owns so strict validation stays meaningful.
+    const allowed=['kind','templateId','title','fields','labels','supplement','dedupe','summary','model'];
+    const picked=Object.fromEntries(Object.entries(payload&&typeof payload==='object'?payload:{}).filter(([key])=>allowed.includes(key)));
+    const parsed=issueDraftSchema.safeParse({...picked,kind:'issue_create'});
+    if(!parsed.success) throw fail(400,formatIssueDraftError(parsed.error));
+    const templates=await getIssueTemplates(db,config,{fetchImpl});
+    const repoLabels=listLabels(db).map(label=>label.name);
+    const inspection=inspectIssueDraft(parsed.data,{templates:templates.templates,repoLabels});
+    if(inspection.errors.length) throw fail(400,inspection.errors.join('；'),'ISSUE_DRAFT_INVALID');
+    let duplicates=parsed.data.dedupe.candidates;
+    if(!config.demo) {
+      const found=[];
+      for(const query of parsed.data.dedupe.queries.slice(0,3)) {
+        try { found.push(...await searchIssues({repo:config.repo,token:config.githubToken,query,state:'all',perPage:10,fetchImpl})); } catch { /* keep Agent evidence */ }
+      }
+      const unique=[...new Map(found.map(item=>[item.number,item])).values()];
+      if(unique.length) duplicates=attachDuplicateScores(parsed.data,inspection.template,unique);
+    }
+    return submitAgentDraft(db,{taskId:task.id,memberId:agent.memberId,agentName:agent.agentName,agentTokenPrefix:agent.tokenPrefix,
+      draft:{kind:'issue_create',summary:parsed.data.summary||parsed.data.title,comment_md:'',comments:[],actions:[],references:[],confidence:0,model:parsed.data.model,
+        payload:buildIssuePayload(parsed.data,{template:inspection.template,duplicates})}});
+  }
+  async function submitPrDraft({task,payload,agent}) {
+    const allowed=['kind','issueNumber','prUrl','prNumber','headSha','baseRef','headRef','forkOwner','prTitle','gate','unverified','summary','model'];
+    const picked=Object.fromEntries(Object.entries(payload&&typeof payload==='object'?payload:{}).filter(([key])=>allowed.includes(key)));
+    const parsed=prDraftSchema.safeParse({...picked,kind:'pr_result'});
+    if(!parsed.success) throw fail(400,formatPrDraftError(parsed.error));
+    if(Number(task.number)!==parsed.data.issueNumber) throw fail(400,'PR 关联的 Issue 与任务不一致','PR_ISSUE_MISMATCH');
+    let verification={errors:[],checks:{state:'unknown',checkRuns:'unknown',statuses:'unknown'},pr:null};
+    if(!config.demo) verification=await verifyPrResult({payload:parsed.data,repo:config.repo,memberLogin:agent.login,token:config.githubToken,fetchImpl});
+    if(verification.errors.length) throw fail(400,verification.errors.join('；'),'PR_DRAFT_INVALID');
+    return submitAgentDraft(db,{taskId:task.id,memberId:agent.memberId,agentName:agent.agentName,agentTokenPrefix:agent.tokenPrefix,
+      draft:{kind:'pr_result',summary:parsed.data.summary||parsed.data.prTitle||`PR #${parsed.data.prNumber}`,comment_md:'',comments:[],actions:[],references:[],confidence:0,model:parsed.data.model,
+        payload:{...parsed.data,checks:verification.checks,pr:verification.pr}}});
+  }
+  async function publishIssueDraft(req,res,body,draft) {
+    const payload=draft.payload||{};
+    const templates=await getIssueTemplates(db,config,{fetchImpl});
+    const repoLabels=listLabels(db).map(label=>label.name);
+    const shape={templateId:payload.templateId,title:payload.title,fields:payload.fields||{},labels:payload.labels||[],supplement:payload.supplement||'',
+      dedupe:payload.dedupe||{queries:[],candidates:[],conclusion:'not_duplicate',rationale:''}};
+    const inspection=inspectIssueDraft(shape,{templates:templates.templates,repoLabels});
+    if(inspection.errors.length) throw fail(400,inspection.errors.join('；'),'ISSUE_DRAFT_INVALID');
+    if(!config.demo) {
+      const found=[];
+      for(const query of (shape.dedupe.queries||[]).slice(0,3)) {
+        try { found.push(...await searchIssues({repo:config.repo,token:config.githubToken,query,state:'all',perPage:10,fetchImpl})); } catch { /* comment search failure below */ }
+      }
+      const unique=[...new Map(found.map(item=>[item.number,item])).values()];
+      if(unique.length) {
+        const duplicates=attachDuplicateScores(shape,inspection.template,unique);
+        const blockers=duplicateBlockers(duplicates,body.confirmedDuplicates||[]);
+        if(blockers.length) throw fail(409,`存在相近 Issue 未确认：${blockers.map(item=>`#${item.number} ${item.title}（相似度 ${Math.round(item.similarity*100)}%）`).join('；')}`,'ISSUE_DUPLICATE');
+      }
+    }
+    if(config.demo) {
+      markPublished(db,draft.id,'');
+      audit(req,'agent.issue_publish','agent_draft',draft.id,null,{demo:true});
+      return res.json({demo:true,simulated:true,draft:getAgentDraft(db,draft.id,req.member.id),issueUrl:'',issueNumber:null});
+    }
+    const token=getGitHubToken(db,req.member.id,config);
+    if(!token) throw fail(409,'需要 GitHub 写权限，请重新登录授权（public_repo）','GITHUB_WRITE_AUTH_REQUIRED');
+    const agentLabel=(draft.agentName||(draft.agentTokenPrefix?`${draft.agentTokenPrefix}…`:draft.model||'未命名 Agent')).replace(/[\r\n]+/g,' ').slice(0,120);
+    const modelNote=draft.model&&draft.model!==draft.agentName?`（模型：${draft.model}）`:'';
+    const annotation=`\n\n---\n> 本 Issue 由 Agent「${agentLabel}」生成${modelNote}，经 @${req.user.login} 审核后以本人身份创建。`;
+    let issue;
+    try { issue=await createIssue({repo:config.repo,token,title:payload.title,body:`${inspection.body}${annotation}`,labels:payload.labels||[],fetchImpl}); }
+    catch(error) { markPublishError(db,draft.id,error.message); throw error; }
+    markPublished(db,draft.id,issue.html_url);
+    audit(req,'agent.issue_publish','agent_draft',draft.id,null,{issueNumber:issue.number,issueUrl:issue.html_url,identity:'member',agentName:agentLabel});
+    try { await services.sync(); } catch { /* the issue exists on GitHub; sync is best-effort */ }
+    res.json({draft:getAgentDraft(db,draft.id,req.member.id),issueUrl:issue.html_url,issueNumber:issue.number});
+  }
+  async function publishPrDraft(req,res,draft) {
+    const payload=draft.payload||{};
+    if(!config.demo) {
+      const verification=await verifyPrResult({payload,repo:config.repo,memberLogin:req.user.login,token:config.githubToken,fetchImpl});
+      if(verification.errors.length) throw fail(409,verification.errors.join('；'),'PR_DRAFT_INVALID');
+    }
+    markPublished(db,draft.id,payload.prUrl||'');
+    audit(req,'agent.pr_accept','agent_draft',draft.id,null,{prUrl:payload.prUrl||'',prNumber:payload.prNumber||null});
+    res.json({draft:getAgentDraft(db,draft.id,req.member.id),prUrl:payload.prUrl||''});
+  }
   app.use('/api/agent',(req,res,next)=>{if(!agentEnabled) return agentNotFound(res);next();});
   if(agentEnabled) {
     app.get('/api/agent/me',requireAgentToken,(req,res)=>res.json({memberId:req.agent.memberId,login:req.agent.login,name:req.agent.name,scopes:req.agent.scopes}));
@@ -225,11 +357,24 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       z.object({}).strict().parse(req.query);
       const task=getAgentTask(db,req.params.id,req.agent.memberId);
       if(!task) throw fail(404,'任务不存在');
-      const context=await agentItemContext(task.itemId,task.messageId);
-      if(!context) throw fail(404,'事务不存在');
       // Keep the requester's intent next to the facts so a claimed task never
       // loses the hint if the Agent did not cache the task list response.
-      res.json({...context,task:{id:task.id,hint:task.hint,replyTo:task.replyTo}});
+      const taskInfo={id:task.id,kind:task.kind,hint:task.hint,replyTo:task.replyTo,item:task.item};
+      if(task.kind==='issue_create') {
+        const templates=await getIssueTemplates(db,config,{fetchImpl});
+        return res.json({kind:'issue_create',repo:config.repo,requirement:task.hint,task:taskInfo,
+          templates:templates.templates,labels:listLabels(db).map(label=>label.name),
+          instructions:issueTaskInstructions({repo:config.repo})});
+      }
+      const context=await agentItemContext(task.itemId,task.messageId);
+      if(!context) throw fail(404,'事务不存在');
+      if(task.kind==='pr_create') {
+        let devflow=null,devflowError='';
+        try { devflow=await getDevflowSkill(db,config,{fetchImpl}); } catch(error) { devflowError=error.message; }
+        return res.json({...context,kind:'pr_create',repo:config.repo,baseRef:'master',devflow,devflowError,task:taskInfo,
+          instructions:prTaskInstructions({repo:config.repo})});
+      }
+      res.json({...context,task:taskInfo});
     });
     app.get('/api/agent/items/:id/context',requireAgentToken,agentLimiter,async(req,res)=>{
       z.object({}).strict().parse(req.query);
@@ -249,32 +394,23 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       res.json(await agentAdaptor.wiki({repo:query.repo,topic:query.topic}));
     });
     app.post('/api/agent/tasks/:id/submit',requireAgentToken,agentLimiter,async(req,res)=>{
-      const payload=req.body?.draft ?? req.body;
-      const parsed=agentDraftSchema.safeParse(payload);
-      if(!parsed.success) throw fail(400,formatDraftError(parsed.error));
-      const task=db.prepare('SELECT item_id,message_id FROM agent_tasks WHERE id=? AND member_id=?').get(req.params.id,req.agent.memberId);
+      const task=db.prepare('SELECT * FROM agent_tasks WHERE id=? AND member_id=?').get(req.params.id,req.agent.memberId);
       if(!task) throw fail(404,'任务不存在或不属于当前令牌');
-      const item=allItems().find(entry=>entry.id===task.item_id);
-      if(!item) throw fail(404,'事务不存在');
-      const comments=parsed.data.comments||[];
-      if(comments.length&&item.kind!=='pr') throw fail(400,'只有 PR 检视可以提交行内意见','INLINE_COMMENT_INVALID');
-      if(task.message_id&&comments.length) throw fail(400,'回复检视意见时不能附带行内意见','INLINE_COMMENT_INVALID');
-      if(item.kind==='pr'&&!task.message_id&&!comments.length) throw fail(400,'PR 检视草稿至少需要一条行内意见','INLINE_COMMENT_REQUIRED');
-      if(item.kind==='pr'&&!task.message_id&&parsed.data.comment_md.length>600) throw fail(400,'PR 检视摘要请控制在 600 字以内，具体问题写到行内意见','REVIEW_SUMMARY_TOO_LONG');
-      for(const [index,comment] of comments.entries()) {
-        const formatError=inlineCommentFormatError(comment.body);
-        if(formatError) throw fail(400,`comments.${index}.body：${formatError}`,'INLINE_COMMENT_FORMAT');
-      }
-      if(comments.length&&!config.demo) {
-        let files;
-        try { files=await fetchPullRequestFiles({repo:config.repo,number:item.number,token:config.githubToken,fetchImpl}); }
-        catch { throw fail(502,'无法校验行内意见：读取 PR 文件失败，请稍后重试','REVIEW_FILES_UNAVAILABLE'); }
-        const error=validateInlineComments(files,comments);
-        if(error) throw fail(400,`行内意见定位无效：${error}`,'INLINE_COMMENT_INVALID');
-      }
-      const draft=submitAgentDraft(db,{taskId:req.params.id,memberId:req.agent.memberId,draft:parsed.data,agentName:req.agent.agentName,agentTokenPrefix:req.agent.tokenPrefix});
-      addAudit(db,{actorId:req.agent.memberId,action:'agent.draft.submit',targetType:'agent_draft',targetId:draft.id,after:{taskId:req.params.id},requestId:req.requestId});
+      const payload=req.body?.draft ?? req.body;
+      const draft=task.kind==='issue_create'?await submitIssueDraft({task,payload,agent:req.agent})
+        :task.kind==='pr_create'?await submitPrDraft({task,payload,agent:req.agent})
+        :await submitItemDraft({task,payload,agent:req.agent});
+      addAudit(db,{actorId:req.agent.memberId,action:'agent.draft.submit',targetType:'agent_draft',targetId:draft.id,after:{taskId:req.params.id,kind:draft.kind},requestId:req.requestId});
       res.status(201).json({draft});
+    });
+    app.get('/api/agent/issue-templates',requireAgentToken,agentLimiter,async(req,res)=>{
+      z.object({}).strict().parse(req.query);
+      res.json(await getIssueTemplates(db,config,{fetchImpl}));
+    });
+    app.get('/api/agent/issues/search',requireAgentToken,agentLimiter,async(req,res)=>{
+      const query=z.object({q:z.string().trim().min(1).max(200),state:z.enum(['open','closed','all']).default('open'),label:z.string().trim().max(100).optional()}).strict().parse(req.query);
+      const items=await agentIssueSearch({query:query.q,state:query.state,label:query.label||''});
+      res.json({items});
     });
   }
   app.get('/api/public/overview',(req,res)=>{z.object({}).strict().parse(req.query);res.json(services.publicPortal.overview());});
@@ -479,11 +615,34 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       audit(req,'agent.token.revoke','agent_token',req.params.id);
       res.json({ok:true});
     });
+    app.post('/api/agent/issue-tasks',rateLimit({windowMs:86400000,limit:5,keyGenerator:req=>`agent-issue-task:${req.member.id}`}),(req,res)=>{
+      fresh(req);
+      const body=z.object({requirement:z.string().trim().min(10).max(2000),templateId:z.string().trim().max(100).optional(),hint:z.string().trim().max(500).optional(),clientRequestId:z.string().uuid().optional()}).strict().parse(req.body||{});
+      const hint=[body.requirement,body.hint?`补充：${body.hint}`:'',body.templateId?`期望模板：${body.templateId}`:''].filter(Boolean).join('\n\n');
+      const result=createAgentTask(db,{kind:'issue_create',repo:config.repo,memberId:req.member.id,hint,clientRequestId:body.clientRequestId||randomUUID()});
+      if(result.created) audit(req,'agent.issue_task.create','agent_task',result.task.id,null,{templateId:body.templateId||''});
+      res.status(result.created?201:200).json(result);
+    });
+    app.get('/api/agent/my-tasks',(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.query);
+      res.json({tasks:listTasksForMember(db,req.member.id)});
+    });
+    app.get('/api/issue-templates',async(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.query);
+      res.json(await getIssueTemplates(db,config,{fetchImpl}));
+    });
     app.post('/api/items/:id/agent-task',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`agent-task:${req.member.id}`}),(req,res)=>{
-      fresh(req);const body=z.object({hint:z.string().trim().max(500).optional(),messageId:z.string().min(1).max(200).optional()}).strict().parse(req.body||{});
+      fresh(req);const body=z.object({hint:z.string().trim().max(500).optional(),messageId:z.string().min(1).max(200).optional(),kind:z.enum(['item_review','pr_create']).default('item_review')}).strict().parse(req.body||{});
       const item=itemForRequest(req);
       if(item.kind!=='issue'&&item.kind!=='pr') throw fail(400,'只有 Issue 或 PR 可以交给 Agent');
       if(item.state!=='open') throw fail(400,'已关闭的 Issue / PR 不能创建 Agent 任务');
+      if(body.kind==='pr_create') {
+        if(item.kind!=='issue') throw fail(400,'只能针对 Issue 创建提 PR 任务');
+        if(body.messageId) throw fail(400,'提 PR 任务不支持评论锚点');
+        const result=createAgentTask(db,{kind:'pr_create',itemId:item.id,repo:config.repo,number:item.number,memberId:req.member.id,hint:body.hint||''});
+        if(result.created) audit(req,'agent.pr_task.create','item',item.id,null,{taskId:result.task.id});
+        return res.status(result.created?201:200).json(result);
+      }
       let messageId='',reviewCommentId='';
       if(body.messageId) {
         const target=getMessage(db,item.id,body.messageId);
@@ -514,10 +673,12 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       res.json({drafts:listDraftsForMember(db,req.member.id)});
     });
     app.post('/api/agent/drafts/:id/publish',async(req,res)=>{
-      fresh(req);const body=z.object({actions:z.array(agentActionSchema).max(10).optional(),commentIndexes:z.array(z.number().int().min(0).max(20)).max(20).optional()}).strict().parse(req.body||{});
+      fresh(req);const body=z.object({actions:z.array(agentActionSchema).max(10).optional(),commentIndexes:z.array(z.number().int().min(0).max(20)).max(20).optional(),confirmedDuplicates:z.array(z.number().int().min(1).max(100000000)).max(20).optional()}).strict().parse(req.body||{});
       const draft=getAgentDraft(db,req.params.id,req.member.id);
       if(!draft) throw fail(404,'草稿不存在');
       if(draft.status!=='pending') throw fail(409,'该草稿已处理，不能重复发布');
+      if(draft.kind==='issue_create') return publishIssueDraft(req,res,body,draft);
+      if(draft.kind==='pr_result') return publishPrDraft(req,res,draft);
       const actions=body.actions ?? draft.actions;
       const comments=draft.comments||[];
       const selectedComments=(() => {
@@ -568,6 +729,19 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
       if(draft.status!=='pending') throw fail(409,'该草稿已处理');
       markDeclined(db,draft.id);
       audit(req,'agent.draft.decline','agent_draft',draft.id);
+      res.json({draft:getAgentDraft(db,draft.id,req.member.id)});
+    });
+    app.post('/api/agent/drafts/:id/refresh',async(req,res)=>{
+      fresh(req);z.object({}).strict().parse(req.body||{});
+      const draft=getAgentDraft(db,req.params.id,req.member.id);
+      if(!draft) throw fail(404,'草稿不存在');
+      if(draft.kind!=='pr_result') throw fail(400,'只有 PR 结果草稿支持刷新');
+      let payload={...(draft.payload||{})};
+      if(!config.demo) {
+        const verification=await verifyPrResult({payload,repo:config.repo,memberLogin:req.user.login,token:config.githubToken,fetchImpl});
+        payload={...payload,checks:verification.checks,pr:verification.pr,verifyErrors:verification.errors,refreshedAt:new Date().toISOString()};
+      }
+      updateDraftPayload(db,draft.id,payload);
       res.json({draft:getAgentDraft(db,draft.id,req.member.id)});
     });
   }

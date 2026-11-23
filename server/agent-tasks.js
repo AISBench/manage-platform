@@ -29,21 +29,34 @@ function expireStale(db, memberId) {
     .run(nowIso(), memberId, nowIso());
 }
 
-export function createTask(db, { itemId, repo, number, memberId, hint = '', messageId = '', reviewCommentId = '' }) {
+const TASK_KINDS = ['item_review', 'issue_create', 'pr_create'];
+
+function defaultAnchor({ kind, itemId, messageId, memberId, clientRequestId }) {
+  if (kind === 'issue_create') return `issue_create:${memberId}:${clientRequestId || randomUUID()}`;
+  if (kind === 'pr_create') return `pr_create:${itemId}`;
+  return `item_review:${itemId}:${messageId || ''}`;
+}
+
+function findActiveByAnchor(db, memberId, anchorKey) {
+  return db.prepare(`SELECT * FROM agent_tasks WHERE member_id=? AND anchor_key=? AND status IN (${ACTIVE.map(() => '?').join(',')})`)
+    .get(memberId, anchorKey, ...ACTIVE);
+}
+
+export function createTask(db, { itemId = null, kind = 'item_review', repo, number = null, memberId, hint = '', messageId = '', reviewCommentId = '', anchorKey = '', clientRequestId = '' }) {
+  if (!TASK_KINDS.includes(kind)) throw Object.assign(new Error('未知的 Agent 任务类型'), { status: 400, code: 'AGENT_TASK_KIND' });
   expireStale(db, memberId);
-  const existing = db.prepare(`SELECT * FROM agent_tasks WHERE item_id=? AND member_id=? AND COALESCE(message_id,'')=? AND status IN (${ACTIVE.map(() => '?').join(',')})`)
-    .get(itemId, memberId, messageId || '', ...ACTIVE);
+  const anchor = anchorKey || defaultAnchor({ kind, itemId, messageId, memberId, clientRequestId });
+  const existing = findActiveByAnchor(db, memberId, anchor);
   if (existing) return { task: taskView(db, existing), created: false };
   const id = randomUUID();
   const now = nowIso();
   try {
-    db.prepare('INSERT INTO agent_tasks(id,item_id,repo,number,member_id,hint,message_id,review_comment_id,status,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, itemId, repo, number, memberId, hint || '', messageId || null, reviewCommentId || null, 'queued', now, now, new Date(Date.now() + TASK_TTL_MS).toISOString());
+    db.prepare('INSERT INTO agent_tasks(id,kind,item_id,repo,number,member_id,hint,anchor_key,message_id,review_comment_id,status,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, kind, itemId, repo, number, memberId, hint || '', anchor, messageId || null, reviewCommentId || null, 'queued', now, now, new Date(Date.now() + TASK_TTL_MS).toISOString());
   } catch (error) {
     // A concurrent click on the same anchor may have won the unique index.
     if (String(error?.message || '').includes('UNIQUE')) {
-      const row = db.prepare(`SELECT * FROM agent_tasks WHERE item_id=? AND member_id=? AND COALESCE(message_id,'')=? AND status IN (${ACTIVE.map(() => '?').join(',')})`)
-        .get(itemId, memberId, messageId || '', ...ACTIVE);
+      const row = findActiveByAnchor(db, memberId, anchor);
       if (row) return { task: taskView(db, row), created: false };
     }
     throw error;
@@ -79,12 +92,20 @@ function replyView(db, row) {
 }
 
 function taskView(db, row) {
+  const item = itemSummary(db, row.item_id);
+  const kind = row.kind || 'item_review';
   return {
-    id: row.id, itemId: row.item_id, repo: row.repo, number: Number(row.number), hint: row.hint || '',
+    id: row.id, kind,
+    itemId: row.item_id ?? null, repo: row.repo,
+    number: row.number == null ? null : Number(row.number), hint: row.hint || '',
     status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, expiresAt: row.expires_at,
     messageId: row.message_id || '', reviewCommentId: row.review_comment_id || '',
+    anchorKey: row.anchor_key || '',
     replyTo: replyView(db, row),
-    item: itemSummary(db, row.item_id),
+    item,
+    target: item
+      ? { type: 'item', id: item.id, kind: item.kind, number: item.number, title: item.title, url: item.url }
+      : { type: kind === 'issue_create' ? 'issue_request' : 'none', hint: row.hint || '' },
   };
 }
 
@@ -92,8 +113,8 @@ export function listTasksForMember(db, memberId) {
   expireStale(db, memberId);
   return db.prepare('SELECT * FROM agent_tasks WHERE member_id=? ORDER BY created_at DESC LIMIT 100')
     .all(memberId).map(row => {
-      const draft = db.prepare('SELECT id,status,summary,comment_url,publish_error,updated_at FROM agent_drafts WHERE task_id=?').get(row.id);
-      return { ...taskView(db, row), draft: draft ? { id: draft.id, status: draft.status, summary: draft.summary, commentUrl: draft.comment_url || '', publishError: draft.publish_error || '', updatedAt: draft.updated_at } : null };
+      const draft = db.prepare('SELECT id,kind,status,summary,comment_url,publish_error,updated_at FROM agent_drafts WHERE task_id=?').get(row.id);
+      return { ...taskView(db, row), draft: draft ? { id: draft.id, kind: draft.kind || 'item_comment', status: draft.status, summary: draft.summary, commentUrl: draft.comment_url || '', publishError: draft.publish_error || '', updatedAt: draft.updated_at } : null };
     });
 }
 
@@ -132,11 +153,12 @@ export function submitDraft(db, { taskId, memberId, draft, agentName = '', agent
   if (Date.parse(task.expires_at) < Date.now()) throw conflict('任务已过期，请重新创建');
   const id = randomUUID();
   const now = nowIso();
+  const kind = draft.kind || 'item_comment';
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.prepare(`INSERT INTO agent_drafts(id,task_id,member_id,summary,root_cause_hypothesis,comment_md,comments_json,actions_json,references_json,confidence,model,agent_name,agent_token_prefix,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`)
-      .run(id, taskId, memberId, draft.summary || '', draft.root_cause_hypothesis || '', draft.comment_md, JSON.stringify(draft.comments || []), JSON.stringify(draft.actions || []), JSON.stringify(draft.references || []), draft.confidence || 0, draft.model || '', String(agentName || '').slice(0, 120), String(agentTokenPrefix || '').slice(0, 20), now, now);
+    db.prepare(`INSERT INTO agent_drafts(id,task_id,member_id,summary,root_cause_hypothesis,comment_md,comments_json,actions_json,references_json,confidence,model,agent_name,agent_token_prefix,kind,payload_json,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`)
+      .run(id, taskId, memberId, draft.summary || '', draft.root_cause_hypothesis || '', draft.comment_md || '', JSON.stringify(draft.comments || []), JSON.stringify(draft.actions || []), JSON.stringify(draft.references || []), draft.confidence || 0, draft.model || '', String(agentName || '').slice(0, 120), String(agentTokenPrefix || '').slice(0, 20), kind, JSON.stringify(draft.payload || {}), now, now);
     db.prepare("UPDATE agent_tasks SET status='submitted',updated_at=? WHERE id=?").run(now, taskId);
     db.exec('COMMIT');
   } catch (error) {
@@ -151,6 +173,8 @@ function draftView(db, row, task) {
   const parse = (blob, fallback) => { try { return JSON.parse(blob); } catch { return fallback; } };
   return {
     id: row.id, taskId: row.task_id, memberId: row.member_id, summary: row.summary,
+    kind: row.kind || 'item_comment',
+    payload: parse(row.payload_json, {}),
     rootCauseHypothesis: row.root_cause_hypothesis, commentMd: row.comment_md,
     comments: parse(row.comments_json, []),
     actions: parse(row.actions_json, []), references: parse(row.references_json, []),
@@ -159,7 +183,8 @@ function draftView(db, row, task) {
     commentUrl: row.comment_url || '', publishError: row.publish_error || '',
     createdAt: row.created_at, updatedAt: row.updated_at,
     task: task ? {
-      id: task.id, itemId: task.item_id, repo: task.repo, number: Number(task.number),
+      id: task.id, kind: task.kind || 'item_review', itemId: task.item_id ?? null, repo: task.repo,
+      number: task.number == null ? null : Number(task.number),
       messageId: task.message_id || '', reviewCommentId: task.review_comment_id || '',
       replyTo: replyView(db, task),
       item: itemSummary(db, task.item_id),
@@ -177,6 +202,10 @@ export function getDraft(db, draftId, memberId) {
 export function listDraftsForMember(db, memberId) {
   return db.prepare('SELECT * FROM agent_drafts WHERE member_id=? ORDER BY created_at DESC LIMIT 100').all(memberId)
     .map(row => getDraft(db, row.id, memberId));
+}
+
+export function updateDraftPayload(db, draftId, payload) {
+  db.prepare('UPDATE agent_drafts SET payload_json=?,updated_at=? WHERE id=?').run(JSON.stringify(payload || {}), nowIso(), draftId);
 }
 
 export function markPublished(db, draftId, commentUrl) {

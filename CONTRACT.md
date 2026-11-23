@@ -122,3 +122,26 @@ Members are created by their first GitHub login; there is no administrator creat
 Notification status is pending / sending / sent / failed / skipped / cancelled. A verified personal webhook takes precedence over a verified enterprise OAuth binding; switching or unbinding either channel bumps its generation and cancels queued envelopes. Cancellation is not resurrected by a failed in-flight send. If upstream accepted while revocation raced, keep cancellation plus DELIVERED_AFTER_REVOCATION and audit actual external acceptance; no retry. UUID-based upstream dedup is bounded, not exactly-once; personal custom bots do not support UUID dedup.
 
 Default polling10 minutes, event/message worker15 seconds; neither is a guaranteed delivery SLA. Global notifications default disabled; invalid/unreachable recipients are visible, not silently treated as delivered. CI instant-failure messages, GitHub writes, multi-repo and Feishu interactive cards are explicitly deferred.
+
+## Agent access
+
+Personal tokens (`ask_…`, stored as SHA-256) authenticate the Bearer routes under `/api/agent/*`; they never create browser sessions.
+
+| Method and route | Request / response |
+| --- | --- |
+| GET /api/agent/me | `{memberId,login,name,scopes}` |
+| GET /api/agent/tasks | `{tasks}` queued/claimed only, each with `kind`, optional `item`, `target`, `hint`, `replyTo` |
+| POST /api/agent/tasks/:id/claim | `{}` → `{ok:true}`; idempotent |
+| GET /api/agent/tasks/:id/context | `item_review` returns whitelisted item facts; `issue_create` returns `{templates,labels,instructions}`; `pr_create` adds `{devflow:{sha,skill,references},instructions}` |
+| POST /api/agent/tasks/:id/submit | `{draft}`; schema chosen by task kind (`item_comment` / `issue_create` / `pr_result`); creates a pending draft only |
+| GET /api/agent/issue-templates | `{repo,fetchedAt,source,templates}` cached repository issue forms |
+| GET /api/agent/issues/search?q&state&label | `{items}` duplicate search pinned to the configured repository |
+| POST /api/agent/issue-tasks | Member `{requirement,templateId?,hint?,clientRequestId?}` → `{task,created}`; 5/day |
+| GET /api/agent/my-tasks | Member `{tasks}`, including item-less issue tasks |
+| GET /api/issue-templates | Member view of the cached issue forms |
+| POST /api/items/:id/agent-task | Member `{hint?,messageId?,kind?:item_review|pr_create}` → `{task,created}`; `pr_create` only for open issues |
+| POST /api/agent/drafts/:id/publish | Member `{actions?,commentIndexes?,confirmedDuplicates?}`; issue drafts re-run duplicate checks and create the issue as the member with template labels plus an Agent disclosure line; `pr_result` only verifies and records, never writes GitHub |
+| POST /api/agent/drafts/:id/refresh | Member `{}`; `pr_result` re-reads the PR, head_sha and CI state |
+| POST /api/agent/drafts/:id/decline | Member `{}` → `{draft}` |
+
+Issue drafts must include every template label and required field; the platform renders the body from the template. Duplicate candidates scoring at least 0.8 must be confirmed explicitly before publishing. PR results must target the configured repository, be authored by the member, link the task issue, match the reported `head_sha`, and contain no FAIL gate; local evidence is always reported as unverified.

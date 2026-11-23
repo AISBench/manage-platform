@@ -472,3 +472,126 @@ export async function rerunGitHubWorkflow({ repo, runId, token, fetchImpl = fetc
   }
 }
 
+// Create an issue as the member. GitHub applies no issue-form labels for API
+// calls, so the platform must send the template labels explicitly. Members
+// without triage can still open an issue but GitHub drops/denies the labels;
+// callers surface that instead of silently publishing a template-less issue.
+export async function createIssue({ repo, token, title, body, labels = [], fetchImpl = fetch }) {
+  const base = repoBase(repo);
+  requiredString(token, 'GitHub write token');
+  const cleanTitle = requiredString(title, 'issue title', 300).trim();
+  if (typeof body !== 'string' || !body.trim() || body.length > 65536 || body.includes('\u0000')) throw new IntegrationError('Invalid GitHub issue body');
+  const payloadLabels = (Array.isArray(labels) ? labels : []).map(name => requiredString(name, 'label', 100));
+  const headers = {
+    Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
+    'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage', Authorization: `Bearer ${token}`,
+  };
+  const { data } = await requestJson(`${base}/issues`, {
+    fetchImpl, timeoutMs: 20000, headers, method: 'POST', label: 'GitHub issue',
+    body: JSON.stringify({ title: cleanTitle, body, labels: payloadLabels }),
+  });
+  if (!data || !Number.isSafeInteger(data.number) || data.number < 1 || typeof data.html_url !== 'string') {
+    throw new IntegrationError('GitHub returned invalid issue data');
+  }
+  return data;
+}
+
+// Search existing issues for duplicate detection. The query is always pinned to
+// the configured repository and restricted to issues, so an Agent cannot use it
+// to read arbitrary repositories.
+export async function searchIssues({ repo, token, query, state = 'open', labels = [], perPage = 10, fetchImpl = fetch }) {
+  repoBase(repo);
+  const terms = [`repo:${repo}`, 'is:issue'];
+  if (state === 'open' || state === 'closed') terms.push(`state:${state}`);
+  for (const label of (Array.isArray(labels) ? labels : []).slice(0, 5)) terms.push(`label:"${String(label).replace(/"/g, '')}"`);
+  const text = typeof query === 'string' ? query.trim() : '';
+  if (text) terms.push(text);
+  const url = `${API}/search/issues?${new URLSearchParams({ q: terms.join(' '), per_page: String(Math.max(1, Math.min(30, perPage))), sort: 'updated', order: 'desc' })}`;
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const { data } = await requestJson(url, { fetchImpl, timeoutMs: 15000, headers, label: 'GitHub issue search' });
+  if (!Array.isArray(data?.items)) throw new IntegrationError('GitHub returned invalid issue search data');
+  return data.items.map(item => ({
+    number: item.number,
+    title: typeof item.title === 'string' ? item.title : '',
+    state: typeof item.state === 'string' ? item.state : '',
+    url: typeof item.html_url === 'string' ? item.html_url : '',
+    body: String(item.body || '').slice(0, 4000),
+    labels: strings(item.labels, label => typeof label === 'string' ? label : label?.name),
+    updatedAt: item.updated_at || null,
+  }));
+}
+
+async function requestText(url, { fetchImpl = fetch, headers = {}, timeoutMs = 15000, label = 'GitHub' } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response;
+    try { response = await fetchImpl(url, { headers, redirect: 'error', signal: controller.signal }); }
+    catch { throw new IntegrationError(`${label} network request failed`); }
+    if (!response?.ok) {
+      const error = new IntegrationError(`${label} request failed${Number.isInteger(response?.status) ? ` (HTTP ${response.status})` : ''}`, response?.status);
+      if (response?.status === 404) error.code = 'NOT_FOUND';
+      throw error;
+    }
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Read a single repository file at a pinned ref. Used for Agent skills, where
+// evidence must reference the exact text the Agent was told to follow.
+export async function fetchRepositoryFile({ repo, path: filePath, ref = '', token, fetchImpl = fetch }) {
+  const base = repoBase(repo);
+  if (typeof filePath !== 'string' || !filePath.trim() || filePath.startsWith('/') || filePath.split('/').includes('..')) {
+    throw new IntegrationError('Invalid GitHub file path');
+  }
+  const headers = { Accept: 'application/vnd.github.raw', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  const text = await requestText(`${base}/contents/${encodeURIComponent(filePath).replace(/%2F/g, '/')}${query}`, {
+    fetchImpl, headers, label: 'GitHub file',
+  });
+  if (text.length > 300000) throw new IntegrationError('GitHub file is too large');
+  return text;
+}
+
+export async function fetchLatestCommitSha({ repo, branch = '', token, fetchImpl = fetch }) {
+  const { base, request } = reader(repo, token, fetchImpl);
+  const url = branch ? `${base}/commits/${encodeURIComponent(branch)}` : `${base}/commits?per_page=1`;
+  const { data } = await request(url);
+  const sha = Array.isArray(data) ? data[0]?.sha : data?.sha;
+  if (typeof sha !== 'string' || !/^[a-fA-F0-9]{7,64}$/.test(sha)) throw new IntegrationError('GitHub returned invalid commit data');
+  return sha;
+}
+
+// Read the repository's issue forms as raw YAML. Parsing lives in
+// server/issue-templates.js so this module stays a transport layer.
+export async function fetchIssueTemplateFiles({ repo, token, fetchImpl = fetch }) {
+  const base = repoBase(repo);
+  const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'aisbench-triage' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let entries;
+  try {
+    const { data } = await requestJson(`${base}/contents/.github/ISSUE_TEMPLATE`, { fetchImpl, headers, label: 'GitHub issue templates' });
+    entries = data;
+  } catch (error) {
+    if (error?.status === 404 || error?.code === 'NOT_FOUND') return [];
+    throw error;
+  }
+  if (!Array.isArray(entries)) throw new IntegrationError('GitHub returned invalid issue template list');
+  const files = entries
+    .filter(entry => entry?.type === 'file' && /\.ya?ml$/i.test(String(entry.name)) && String(entry.name).toLowerCase() !== 'config.yml')
+    .slice(0, 30);
+  const out = [];
+  for (const entry of files) {
+    const text = await requestText(`${base}/contents/${encodeURIComponent(entry.path).replace(/%2F/g, '/')}`, {
+      fetchImpl, headers: { ...headers, Accept: 'application/vnd.github.raw' }, label: `GitHub issue template ${entry.name}`,
+    });
+    if (text.length > 200000) throw new IntegrationError(`GitHub issue template ${entry.name} is too large`);
+    out.push({ name: entry.name, text });
+  }
+  return out;
+}
+

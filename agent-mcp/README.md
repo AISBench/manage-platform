@@ -28,7 +28,7 @@
 }
 ```
 
-需要固定版本时把 `aisbench-mcp` 换成 `aisbench-mcp@0.1.1`。
+需要固定版本时把 `aisbench-mcp` 换成 `aisbench-mcp@0.2.0`。
 
 Claude Code：
 
@@ -66,7 +66,9 @@ AISBENCH_URL=https://aisbench.cn AISBENCH_TOKEN=ask_xxx npx -y aisbench-mcp init
 | `aisbench_issue_context` | Issue / PR 白名单事实（PR 含变更文件与 patch；带 `replyTo` 时含目标评论或检视意见与线程历史） |
 | `aisbench_kb_search` | 只检索知识库，返回路径/行号/片段 |
 | `aisbench_kb_wiki` | 读取 wiki 页面正文 |
-| `aisbench_task_submit` | 提交草稿（PR 检视需带多条 `comments` 行内意见；进入人工审阅，不直接发布） |
+| `aisbench_issue_templates` | 读取仓库 Issue 模板（标题前缀、默认标签、必填字段），提 Issue 前使用 |
+| `aisbench_issue_search` | 检索仓库已有 Issue 用于查重（编号/标题/状态/链接/正文片段） |
+| `aisbench_task_submit` | 提交草稿：`item_review` 提交评论或 PR 检视（PR 需带多条 `comments`）；`issue_create` 提交 Issue 草稿；`pr_create` 提交 PR 结果（PR 链接、head_sha、门禁证据）；统一进入人工审阅 |
 
 ## 4. 常见问题
 
