@@ -103,6 +103,23 @@ test('demo member can send a local conversation message without GitHub', async t
   assert.equal(duplicate.data.message.id, sent.data.message.id);
 });
 
+test('demo member can reply to a specific comment', async t => {
+  const f = await httpFixture(t, { config: { demo: true } });
+  const c = f.client('demo-admin');
+  const conversation = await c.request('/api/items/github:9000/conversation');
+  const inline = conversation.data.messages.find(message => message.kind === 'review_comment');
+  const reply = await c.request(`/api/items/github:9000/messages/${encodeURIComponent(inline.id)}/reply`, 'POST', { body: '已按建议修改，请复核', clientId: 'reply-client-1' });
+  assert.equal(reply.status, 201);
+  assert.equal(reply.data.message.source, 'platform');
+  assert.equal(reply.data.message.deliveryStatus, 'demo');
+  assert.equal(reply.data.message.inReplyToId, '90002', 'inline replies keep the target review comment id');
+  const duplicate = await c.request(`/api/items/github:9000/messages/${encodeURIComponent(inline.id)}/reply`, 'POST', { body: '已按建议修改，请复核', clientId: 'reply-client-1' });
+  assert.equal(duplicate.status, 201);
+  assert.equal(duplicate.data.message.id, reply.data.message.id, 'clientId dedupes retries');
+  assert.equal((await c.request('/api/items/github:9000/messages/unknown/reply', 'POST', { body: 'hello' })).status, 404);
+  assert.equal((await f.client(null).request(`/api/items/github:9000/messages/${encodeURIComponent(inline.id)}/reply`, 'POST', { body: 'hello' }, {})).status, 401);
+});
+
 test('conversation writes require an authenticated member and CSRF', async t => {
   const f = await httpFixture(t, { config: { demo: true } });
   const guest = f.client(null);

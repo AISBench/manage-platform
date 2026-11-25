@@ -560,6 +560,13 @@ export function createApp(config,{db=openDatabase(config.dbPath),integrations={}
     const row=await postPlatformMessage(db,config,{member:req.member,itemId:req.params.id,body:body.body,clientId:body.clientId,fetchImpl});
     res.status(201).json({message:messageDto(db,row,req.member.id)});
   });
+  app.post('/api/items/:id/messages/:messageId/reply',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`comment-reply:${req.member.id}`}),async(req,res)=>{
+    fresh(req);const body=z.object({body:z.string().trim().min(1).max(20000),clientId:z.string().max(64).optional()}).strict().parse(req.body);
+    const target=getMessage(db,req.params.id,req.params.messageId);
+    if(!target) throw fail(404,'原评论不存在');
+    const row=await postPlatformMessage(db,config,{member:req.member,itemId:req.params.id,body:body.body,clientId:body.clientId,replyTo:target,fetchImpl});
+    res.status(201).json({message:messageDto(db,row,req.member.id)});
+  });
   app.post('/api/items/:id/messages/:messageId/retry',rateLimit({windowMs:60000,limit:10,keyGenerator:req=>`comment-retry:${req.member.id}`}),async(req,res)=>{
     fresh(req);z.object({}).strict().parse(req.body);
     const row=await retryPlatformMessage(db,config,{member:req.member,itemId:req.params.id,messageId:req.params.messageId,fetchImpl});
